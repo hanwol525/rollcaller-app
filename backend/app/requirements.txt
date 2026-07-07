@@ -42,3 +42,18 @@ watchfiles==1.2.0
 websockets==16.0
 wrapt==1.17.3
 yarl==1.24.2
+# --- Sync DB driver (replaces asyncpg for sync SQLAlchemy/SQLModel) ---
+psycopg2-binary==2.9.10
+# --- Test suite ---
+pytest==8.3.4
+httpx==0.28.1
+# --- Pronunciation / audio ---
+# NOTE: kokoro version pinned to latest that supports Python 3.13
+kokoro>=0.2.1
+phonemizer==3.3.0
+allosaurus==1.0.2
+numpy==2.2.0
+soundfile==0.12.1
+# --- Security ---
+passlib==1.7.4
+bcrypt==4.2.1
