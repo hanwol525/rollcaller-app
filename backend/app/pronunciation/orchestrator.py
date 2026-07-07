@@ -11,7 +11,7 @@ TTS fallback inside the batch renderer looks like:
 """
 from __future__ import annotations
 
-from app.pronunciation import g2p, recognize, tts
+from app.pronunciation import g2p, recognize, transcode, tts
 
 
 def warm_all() -> None:
@@ -19,11 +19,17 @@ def warm_all() -> None:
     g2p.warm()
     recognize.warm()
     tts.warm()
+    transcode.warm()
 
 
 def g2p_name(name: str) -> str:
     """Grapheme-to-phoneme for a name."""
     return g2p.g2p(name)
+
+
+def normalize_recording(raw: bytes) -> bytes:
+    """Normalize browser audio (webm/opus, mp4/aac, ...) to canonical WAV."""
+    return transcode.to_wav(raw)
 
 
 def recognize_recording(wav_bytes: bytes) -> str:

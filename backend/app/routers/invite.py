@@ -80,19 +80,31 @@ async def upload_recording(
             detail="Empty audio file",
         )
 
+    # Normalize browser audio (webm/opus, mp4/aac, ...) → canonical 16 kHz
+    # mono WAV before anything reads it. One transcode fixes both the
+    # recognition input and the stored blob (which was mislabeled .wav).
+    # RuntimeError (ffmpeg absent + non-WAV) → 500 (mis-provisioned env).
+    try:
+        wav = orchestrator.normalize_recording(raw)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(exc),
+        )
+
     # Run audio-to-IPA recognition (Allosaurus) BEFORE saving the blob,
     # so a recognition failure doesn't leave an orphaned file on disk.
-    ipa = orchestrator.recognize_recording(raw)
+    ipa = orchestrator.recognize_recording(wav)
     if not ipa:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Could not recognize IPA from audio",
         )
 
-    # Store the recording blob (this is the actual recording, not a preview)
+    # Store the recording blob (now honestly WAV, not raw browser bytes)
     if p.recording_key:
         storage.delete(p.recording_key)
-    recording_key = storage.save(raw, ext="wav")
+    recording_key = storage.save(wav, ext="wav")
     p.recording_key = recording_key
 
     # Set ipa_text + ipa_source together (they move together).
