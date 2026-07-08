@@ -19,8 +19,10 @@ Graceful passthrough (matches the rest of the pronunciation pipeline):
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+import tempfile
 
 # ---------------------------------------------------------------------------
 # Warm: cache the ffmpeg path lookup once at startup so we don't probe PATH
@@ -48,7 +50,9 @@ def to_wav(raw: bytes) -> bytes:
     - ffmpeg absent + bytes already WAV: pass through untouched.
     - ffmpeg absent + bytes NOT WAV: raise a clear error (mis-provisioned env).
 
-    No temp files — ffmpeg reads from stdin and writes to stdout via pipes.
+    The ffmpeg-present branch uses temp files — pipes break MP4/M4A because
+    the moov atom needs a seekable input and the WAV header backfill needs a
+    seekable output.  Pattern mirrors recognize.py.
     """
     # Ensure the ffmpeg path is cached (warm() may not have been called yet,
     # e.g. in unit tests that import this module directly).
@@ -64,17 +68,36 @@ def to_wav(raw: bytes) -> bytes:
             "(webm/opus, mp4/aac)."
         )
 
-    # ffmpeg present — transcode to canonical 16 kHz mono WAV via pipes.
-    result = subprocess.run(
-        [
-            ffmpeg, "-hide_banner", "-loglevel", "error",
-            "-i", "pipe:0",
-            "-ac", "1", "-ar", "16000",
-            "-f", "wav", "pipe:1",
-        ],
-        input=raw,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=True,
-    )
-    return result.stdout
+    # ffmpeg present — transcode via temp files.  Pipes (pipe:0/pipe:1) break
+    # MP4/M4A: the moov atom sits at the end of the file and needs a seekable
+    # input; the WAV header's data-size backfill needs a seekable output.
+    # Seekable real paths fix both.  Pattern mirrors recognize.py.
+    in_path: str | None = None
+    out_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False) as in_f:
+            in_f.write(raw)
+            in_path = in_f.name
+
+        out_path = in_path + ".wav"
+
+        subprocess.run(
+            [
+                ffmpeg, "-hide_banner", "-loglevel", "error",
+                "-i", in_path,
+                "-ac", "1", "-ar", "16000",
+                "-y",
+                "-f", "wav", out_path,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+
+        with open(out_path, "rb") as out_f:
+            return out_f.read()
+    finally:
+        if in_path is not None and os.path.exists(in_path):
+            os.unlink(in_path)
+        if out_path is not None and os.path.exists(out_path):
+            os.unlink(out_path)
