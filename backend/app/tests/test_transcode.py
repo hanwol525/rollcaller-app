@@ -5,10 +5,14 @@ passthrough and ffmpeg transcode paths without requiring the full ML stack.
 """
 from __future__ import annotations
 
+import io
+import os
 import shutil
 import subprocess
+import tempfile
 
 import pytest
+import soundfile as sf
 
 from app.pronunciation import transcode
 
@@ -69,33 +73,37 @@ class TestToWavTranscode:
         shutil.which("ffmpeg") is None,
         reason="ffmpeg not installed",
     )
-    def test_transcodes_non_wav_to_riff(self):
-        """Synthesize a tiny non-WAV input (raw sine via ffmpeg lavfi) and
-        confirm to_wav produces canonical WAV (RIFF header)."""
-        # Generate 0.1s of raw PCM (not WAV) — ffmpeg lavfi sine → raw s16le.
-        raw_pcm = subprocess.run(
+    def test_transcodes_non_canonical_wav_to_riff(self):
+        """Feed a non-canonical WAV (48 kHz stereo) and confirm to_wav
+        transcodes it to canonical 16 kHz mono WAV with real audio samples.
+        Uses WAV so ffmpeg can auto-detect the format from the temp file."""
+        non_canonical = subprocess.run(
             [
                 "ffmpeg", "-hide_banner", "-loglevel", "error",
                 "-f", "lavfi", "-i", "sine=frequency=440:duration=0.1",
-                "-f", "s16le", "-ac", "1", "-ar", "16000", "pipe:1",
+                "-ar", "48000", "-ac", "2", "-f", "wav", "pipe:1",
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=True,
         ).stdout
 
-        # Reset cache so to_wav picks up the real ffmpeg on PATH
         transcode._ffmpeg_path = None
-        result = transcode.to_wav(raw_pcm)
+        result = transcode.to_wav(non_canonical)
         assert result[:4] == b"RIFF"
         assert result[8:12] == b"WAVE"
+        audio, sr = sf.read(io.BytesIO(result))
+        print(f"non_canonical_wav -> {len(audio)} samples @ {sr}Hz")
+        assert len(audio) > 0
+        assert sr == 16000
 
     @pytest.mark.skipif(
         shutil.which("ffmpeg") is None,
         reason="ffmpeg not installed",
     )
     def test_transcodes_webm_to_wav(self):
-        """End-to-end: synthesize a webm/opus clip, confirm to_wav → WAV."""
+        """End-to-end: synthesize a webm/opus clip, confirm to_wav → WAV with
+        real audio samples (not just a RIFF header)."""
         webm = subprocess.run(
             [
                 "ffmpeg", "-hide_banner", "-loglevel", "error",
@@ -111,6 +119,55 @@ class TestToWavTranscode:
         result = transcode.to_wav(webm)
         assert result[:4] == b"RIFF"
         assert result[8:12] == b"WAVE"
+        audio, sr = sf.read(io.BytesIO(result))
+        print(f"webm/opus -> {len(audio)} samples @ {sr}Hz")
+        assert len(audio) > 0
+
+    @pytest.mark.skipif(
+        shutil.which("ffmpeg") is None,
+        reason="ffmpeg not installed",
+    )
+    def test_transcodes_m4a_aac_to_wav_nonzero_samples(self):
+        """Regression: M4A/AAC (Safari's recording format) must transcode to
+        WAV with real audio samples.  Pipes produced an empty clip (valid RIFF
+        header, zero samples); temp files fix both the moov-atom seek and the
+        WAV data-size backfill.  This is the test that catches the pipe bug.
+
+        M4A/MP4 is itself non-streamable (moov atom needs a seekable output),
+        so the fixture must be synthesized to a temp file, not piped."""
+        m4a_path: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".m4a", delete=False) as tmp:
+                m4a_path = tmp.name
+
+            subprocess.run(
+                [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=1.0",
+                    "-c:a", "aac", "-b:a", "64k",
+                    "-y", m4a_path,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+
+            with open(m4a_path, "rb") as f:
+                m4a = f.read()
+
+            transcode._ffmpeg_path = None
+            result = transcode.to_wav(m4a)
+            assert result[:4] == b"RIFF"
+            assert result[8:12] == b"WAVE"
+            audio, sr = sf.read(io.BytesIO(result))
+            print(f"m4a/aac -> {len(audio)} samples @ {sr}Hz")
+            assert len(audio) > 0, (
+                f"transcoded M4A decoded to {len(audio)} samples — "
+                "expected thousands (pipe bug regression)"
+            )
+        finally:
+            if m4a_path is not None and os.path.exists(m4a_path):
+                os.unlink(m4a_path)
 
     @pytest.mark.skipif(
         shutil.which("ffmpeg") is None,
@@ -118,11 +175,14 @@ class TestToWavTranscode:
     )
     def test_wav_passes_through_even_with_ffmpeg(self, wav_bytes):
         """When ffmpeg IS present, genuine WAV should still work (gets
-        re-transcoded to 16 kHz mono, but output is valid WAV)."""
+        re-transcoded to 16 kHz mono, but output is valid WAV with samples)."""
         transcode._ffmpeg_path = None
         result = transcode.to_wav(wav_bytes)
         assert result[:4] == b"RIFF"
         assert result[8:12] == b"WAVE"
+        audio, sr = sf.read(io.BytesIO(result))
+        print(f"wav -> {len(audio)} samples @ {sr}Hz")
+        assert len(audio) > 0
 
 
 # ---------------------------------------------------------------------------
