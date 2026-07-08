@@ -25,6 +25,13 @@ class TestGetSelf:
         assert data["ipa_text"] is None
         assert data["ipa_confirmed"] is False
 
+    def test_get_self_returns_space_name(self, client, make_participant):
+        """GET /invite/{token} includes the space/event name for participant screens."""
+        space, p = make_participant()
+        resp = client.get(f"/invite/{p['invite_token']}")
+        assert resp.status_code == 200
+        assert resp.json()["space_name"] == "Test Space"
+
     def test_get_self_bad_token_returns_404(self, client):
         resp = client.get("/invite/invalid-token-xxx")
         assert resp.status_code == 404

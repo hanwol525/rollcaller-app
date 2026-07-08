@@ -29,6 +29,7 @@ from app.models import (
     IPAPreviewRequest,
     Participant,
     ParticipantSelf,
+    Space,
 )
 from app.pronunciation import orchestrator
 from app.storage import storage
@@ -46,16 +47,23 @@ def _get_participant_or_404(db: Session, token: str) -> Participant:
     return p
 
 
-@router.get("/{token}", response_model=ParticipantSelf)
-def get_self(token: str, db: Session = Depends(get_session)):
-    p = _get_participant_or_404(db, token)
+def _build_participant_self(db: Session, p: Participant) -> ParticipantSelf:
+    """Construct ParticipantSelf, looking up the space name for participant screens."""
+    space = db.get(Space, p.space_id)
     return ParticipantSelf(
         id=p.id,
         name=p.name,
+        space_name=space.name if space else "",
         status=p.status,
         ipa_text=p.ipa_text,
         ipa_confirmed=p.ipa_confirmed,
     )
+
+
+@router.get("/{token}", response_model=ParticipantSelf)
+def get_self(token: str, db: Session = Depends(get_session)):
+    p = _get_participant_or_404(db, token)
+    return _build_participant_self(db, p)
 
 
 @router.post("/{token}/recording", response_model=ParticipantSelf)
@@ -121,13 +129,7 @@ async def upload_recording(
     db.commit()
     db.refresh(p)
 
-    return ParticipantSelf(
-        id=p.id,
-        name=p.name,
-        status=p.status,
-        ipa_text=p.ipa_text,
-        ipa_confirmed=p.ipa_confirmed,
-    )
+    return _build_participant_self(db, p)
 
 
 @router.post("/{token}/ipa/preview")
@@ -206,10 +208,4 @@ def confirm_ipa(
     db.commit()
     db.refresh(p)
 
-    return ParticipantSelf(
-        id=p.id,
-        name=p.name,
-        status=p.status,
-        ipa_text=p.ipa_text,
-        ipa_confirmed=p.ipa_confirmed,
-    )
+    return _build_participant_self(db, p)
