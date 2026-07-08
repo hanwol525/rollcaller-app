@@ -176,6 +176,7 @@ class ParticipantSelf(SQLModel):
     """What the participant sees via invite link — only their own info."""
     id: int
     name: str
+    space_name: str          # name of the space/event, for participant screens
     status: ParticipantStatus
     ipa_text: Optional[str]
     ipa_confirmed: bool
