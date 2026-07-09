@@ -1,6 +1,5 @@
 <script lang="ts">
 import { onMount } from 'svelte';
-import { browser } from '$app/environment';
 import { getSelf, uploadRecording, previewIpa, confirmIpa } from '$lib/api';
 import type { ParticipantSelf } from '$lib/api';
 import { startRecording, stopRecording } from '$lib/recorder';
