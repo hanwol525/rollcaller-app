@@ -143,11 +143,6 @@
 			<div class="current-name">
 				{currentItem.name}
 			</div>
-
-			{#if currentItem.ipa_text}
-				<div class="ipa">{currentItem.ipa_text}</div>
-			{/if}
-
 			{#if currentItem.clip_url}
 				<div class="controls-row">
 					<button onclick={togglePlay} class="play-btn">
@@ -271,13 +266,6 @@
 		font-weight: 700;
 		color: #33322f;
 		margin-bottom: 0.5rem;
-	}
-
-	.ipa {
-		font-size: 1.2rem;
-		color: #777;
-		font-family: 'Segoe UI', sans-serif;
-		margin-bottom: 1.5rem;
 	}
 
 	.controls-row {
