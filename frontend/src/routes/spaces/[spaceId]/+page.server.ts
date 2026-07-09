@@ -68,24 +68,48 @@ throw redirect(302, `/spaces/${spaceId}`);
 },
 
 reorder: async ({ request, params, cookies }) => {
-const spaceId = parseInt(params.spaceId, 10);
-const data = await request.formData();
-const pid = parseInt(data.get('pid')?.toString() ?? '0', 10);
-const direction = data.get('direction')?.toString() ?? '';
-const currentPos = parseInt(data.get('currentPos')?.toString() ?? '0', 10);
+	const spaceId = parseInt(params.spaceId, 10);
+	const data = await request.formData();
+	const pid = parseInt(data.get('pid')?.toString() ?? '0', 10);
+	const direction = data.get('direction')?.toString() ?? '';
 
-// Swap with adjacent: send the target position to this participant
-const newPos = direction === 'up' ? currentPos - 1 : currentPos + 1;
-try {
-await serverFetch(`/spaces/${spaceId}/participants/${pid}`, cookies, {
-method: 'PUT',
-body: JSON.stringify({ position: newPos })
-});
-} catch (e) {
-if (e instanceof Response) throw e;
-return { action: 'reorder', error: String(e) };
-}
-throw redirect(302, `/spaces/${spaceId}`);
+	try {
+		// Fetch the current roster (already sorted by position)
+		const participants = await serverFetch<{
+			id: number; position: number;
+		}[]>(`/spaces/${spaceId}/participants`, cookies);
+
+		// Find the clicked participant by pid in the sorted list
+		const clickedIndex = participants.findIndex((p) => p.id === pid);
+		if (clickedIndex === -1) {
+			return { action: 'reorder', error: 'Participant not found' };
+		}
+
+		// Find the neighbor by sorted adjacency
+		const neighborIndex = direction === 'up' ? clickedIndex - 1 : clickedIndex + 1;
+
+		// Guard boundaries — first row up or last row down is a no-op
+		if (neighborIndex < 0 || neighborIndex >= participants.length) {
+			throw redirect(302, `/spaces/${spaceId}`);
+		}
+
+		const clicked = participants[clickedIndex];
+		const neighbor = participants[neighborIndex];
+
+		// Swap the two participants' position values — two PUTs
+		await serverFetch(`/spaces/${spaceId}/participants/${clicked.id}`, cookies, {
+			method: 'PUT',
+			body: JSON.stringify({ position: neighbor.position })
+		});
+		await serverFetch(`/spaces/${spaceId}/participants/${neighbor.id}`, cookies, {
+			method: 'PUT',
+			body: JSON.stringify({ position: clicked.position })
+		});
+	} catch (e) {
+		if (e instanceof Response) throw e;
+		return { action: 'reorder', error: String(e) };
+	}
+	throw redirect(302, `/spaces/${spaceId}`);
 },
 
 render: async ({ params, cookies }) => {

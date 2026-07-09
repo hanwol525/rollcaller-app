@@ -15,6 +15,17 @@
 	const isFinished = $derived(currentIndex >= roster.length);
 	const notPrepped = $derived(roster.length > 0 && roster.every((r) => r.clip_url === null));
 
+	// Reactively set the audio src when the current item changes
+	$effect(() => {
+		if (audioEl && currentItem) {
+			if (currentItem.clip_url) {
+				audioEl.src = currentItem.clip_url;
+			} else {
+				audioEl.removeAttribute('src');
+			}
+		}
+	});
+
 	function goTo(index: number) {
 		// Clamp index
 		const clamped = Math.max(0, Math.min(index, roster.length - 1));
@@ -30,10 +41,25 @@
 	}
 
 	function playCurrent() {
-		if (!currentItem || !currentItem.clip_url) return;
-		if (!audioEl) return;
+		if (!currentItem || !audioEl) return;
+
+		if (!currentItem.clip_url) {
+			// No clip to play — if auto-advance, schedule the advance directly
+			isPlaying = false;
+			if (ceremony.advanced_seconds > 0) {
+				advanceTimer = setTimeout(() => {
+					if (currentIndex < roster.length - 1) {
+						goTo(currentIndex + 1);
+						playCurrent();
+					} else {
+						currentIndex = roster.length;
+					}
+				}, ceremony.advanced_seconds * 1000);
+			}
+			return;
+		}
+
 		isPlaying = true;
-		audioEl.src = currentItem.clip_url;
 		audioEl.play().catch(() => {
 			isPlaying = false;
 		});
@@ -130,11 +156,6 @@
 					<button onclick={prev} disabled={currentIndex === 0} class="nav-btn">← Prev</button>
 					<button onclick={next} disabled={currentIndex === roster.length - 1} class="nav-btn">Next →</button>
 				</div>
-				<audio
-					bind:this={audioEl}
-					onended={onEnded}
-					preload="auto"
-				></audio>
 			{:else}
 				<div class="no-clip">No clip available for this person.</div>
 				<div class="controls-row">
@@ -142,6 +163,9 @@
 					<button onclick={next} disabled={currentIndex === roster.length - 1} class="nav-btn">Next →</button>
 				</div>
 			{/if}
+
+			<!-- Persistent audio element — always in the DOM, src set reactively -->
+			<audio bind:this={audioEl} onended={onEnded} preload="auto"></audio>
 
 			{#if ceremony.advanced_seconds > 0}
 				<div class="auto-advance-note">

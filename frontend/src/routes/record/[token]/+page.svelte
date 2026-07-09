@@ -25,9 +25,13 @@ let micError = $state('');
 	let confirming = $state(false);
 let ipaText: string | null = null; // the hidden IPA baton
 
+// Re-record override: when true, show the recorder regardless of status
+let reRecording = $state(false);
+
 // Determine current screen from status + local state
 let screen = $derived(
 error ? 'error' :
+reRecording ? 'recording' :
 !self ? 'loading' :
 self.status === 'confirmed' ? 'confirmed' :
 self.status === 'recorded' ? 'review' :
@@ -74,7 +78,9 @@ const blob = await stopRecording(recorder);
 recorder = null;
 self = await uploadRecording(token, blob);
 ipaText = self.ipa_text;
+if (previewUrl) { URL.revokeObjectURL(previewUrl); }
 previewUrl = null; // reset cached preview
+reRecording = false; // return to review with fresh take
 } catch (e) {
 error = String(e).replace('Error: ', '');
 } finally {
@@ -119,8 +125,10 @@ confirming = false;
 }
 
 function handleReRecord() {
+if (previewUrl) { URL.revokeObjectURL(previewUrl); }
 previewUrl = null;
-// Go back to landing (invited) screen — recording is client-side within invited
+reRecording = true;
+micError = '';
 }
 </script>
 
@@ -138,8 +146,11 @@ previewUrl = null;
 {:else if screen === 'confirmed'}
 <div class="card confirmed">
 <div class="check">✓</div>
-<h1>You’re all set for {self?.space_name}!</h1>
+<h1>You're all set for {self?.space_name}!</h1>
 <p class="subtitle">Your name pronunciation has been confirmed.</p>
+<button onclick={handleReRecord} class="btn-secondary">
+	Changed your mind? Re-record
+</button>
 </div>
 
 {:else if screen === 'review'}
