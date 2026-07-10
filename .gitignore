@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# RollCaller — real K8s secret manifests (the template secrets.example.yaml
+# is committed; populated copies must never be committed).
+infra/k8s/secrets.yaml
+infra/k8s/*-secret.yaml

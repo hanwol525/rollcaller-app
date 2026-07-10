@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rollcall
+  labels:
+    app.kubernetes.io/name: rollcaller
+    app.kubernetes.io/part-of: rollcaller
