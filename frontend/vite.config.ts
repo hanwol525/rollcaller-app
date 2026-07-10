@@ -20,9 +20,21 @@ export default defineConfig({
 
 	server: {
 		proxy: {
+			// Only proxy API paths that don't collide with page routes.
+			// /spaces is a SvelteKit page route AND an API path — the
+			// server-side code (serverFetch in $lib/server.ts) calls the
+			// backend directly at localhost:8000, so no proxy is needed.
+			// The client-side recorder page uses /invite and /media via
+			// fetch, which do collide — so we bypass those for non-fetch
+			// (page navigation) requests.
 			'/auth': 'http://localhost:8000',
-			'/spaces': 'http://localhost:8000',
-			'/invite': 'http://localhost:8000',
+			'/invite': {
+				target: 'http://localhost:8000',
+				bypass: (req) => {
+					// Only proxy fetch/API calls, not page navigations
+					if (req.headers.accept?.includes('text/html')) return false;
+				}
+			},
 			'/media': 'http://localhost:8000'
 		}
 	}

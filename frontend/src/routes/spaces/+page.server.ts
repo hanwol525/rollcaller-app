@@ -19,7 +19,7 @@ method: 'POST',
 body: JSON.stringify({ name, advanced_seconds })
 });
 } catch (e) {
-if (e instanceof Response) throw e;
+if (e && typeof e === 'object' && 'status' in e && 'location' in e) throw e;
 return { success: false, error: String(e) };
 }
 throw redirect(302, '/spaces');

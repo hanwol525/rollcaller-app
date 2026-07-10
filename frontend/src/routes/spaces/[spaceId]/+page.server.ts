@@ -2,6 +2,12 @@ import type { PageServerLoad, Actions } from './$types';
 import { serverFetch } from '$lib/server';
 import { redirect } from '@sveltejs/kit';
 
+// SvelteKit 2.x redirect() throws a Redirect object, not a Response.
+// This helper re-throws redirect/errors so SvelteKit can handle them.
+function isRedirect(e: unknown): boolean {
+	return e !== null && typeof e === 'object' && 'status' in e && 'location' in e;
+}
+
 export const load: PageServerLoad = async ({ params, cookies }) => {
 const spaceId = parseInt(params.spaceId, 10);
 const space = await serverFetch<{ id: number; name: string; advanced_seconds: number; created_at: string }>(`/spaces/${spaceId}`, cookies);
@@ -26,7 +32,7 @@ method: 'POST',
 body: JSON.stringify([{ name, email }])
 });
 } catch (e) {
-if (e instanceof Response) throw e;
+if (isRedirect(e)) throw e;
 return { action: 'add', error: String(e) };
 }
 throw redirect(302, `/spaces/${spaceId}`);
@@ -46,7 +52,7 @@ method: 'POST',
 body: formData
 });
 } catch (e) {
-if (e instanceof Response) throw e;
+if (isRedirect(e)) throw e;
 return { action: 'import', error: String(e) };
 }
 throw redirect(302, `/spaces/${spaceId}`);
@@ -61,7 +67,7 @@ await serverFetch(`/spaces/${spaceId}/participants/${pid}`, cookies, {
 method: 'DELETE'
 });
 } catch (e) {
-if (e instanceof Response) throw e;
+if (isRedirect(e)) throw e;
 return { action: 'delete', error: String(e) };
 }
 throw redirect(302, `/spaces/${spaceId}`);
@@ -106,7 +112,7 @@ reorder: async ({ request, params, cookies }) => {
 			body: JSON.stringify({ position: clicked.position })
 		});
 	} catch (e) {
-		if (e instanceof Response) throw e;
+		if (isRedirect(e)) throw e;
 		return { action: 'reorder', error: String(e) };
 	}
 	throw redirect(302, `/spaces/${spaceId}`);
@@ -120,7 +126,7 @@ method: 'POST'
 });
 return { action: 'render', rendered: result.rendered };
 } catch (e) {
-if (e instanceof Response) throw e;
+if (isRedirect(e)) throw e;
 return { action: 'render', error: String(e) };
 }
 },
@@ -135,7 +141,7 @@ method: 'PUT',
 body: JSON.stringify({ advanced_seconds })
 });
 } catch (e) {
-if (e instanceof Response) throw e;
+if (isRedirect(e)) throw e;
 return { action: 'pacing', error: String(e) };
 }
 throw redirect(302, `/spaces/${spaceId}`);

@@ -18,8 +18,12 @@ export const actions: Actions = {
 			await serverFetch('/auth/me', cookies);
 			throw redirect(302, '/spaces');
 		} catch (e) {
-			if (e instanceof Response) throw e; // redirect
-			return { success: false, error: 'Login failed' };
+			// SvelteKit 2.x redirect throws a Redirect object, not Response.
+			// Re-throw it so SvelteKit can perform the redirect.
+			if (e && typeof e === 'object' && 'status' in e && 'location' in e) {
+				throw e;
+			}
+			return { success: false, error: 'Login failed: ' + String(e) };
 		}
 	}
 };
