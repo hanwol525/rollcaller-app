@@ -70,6 +70,20 @@ _PROSE_RE = re.compile(
 
 _MAX_IPA_LEN = 80  # implausibly long for a single name's IPA
 
+def _strip_leaked_graphemes(text: str) -> str:
+    """Remove source-spelling letters that leak into Gemma's IPA.
+
+    Gemma sometimes emits a raw grapheme instead of a phoneme — Polish `ł`,
+    an acute-accented `á` — which Kokoro can't parse and mangles. Map the
+    precomposed offenders to their nearest phoneme, then strip combining
+    diacritics (spelling accents, nasal tildes, tie bars) Kokoro's English
+    voice can't render. Real IPA symbols (ʃ ʒ ɔ ɐ ʐ …) are single codepoints
+    with no combining marks, so they pass through untouched.
+    """
+    import unicodedata
+    text = text.replace("ł", "w").replace("Ł", "w")   # Polish ł = /w/
+    decomposed = unicodedata.normalize("NFD", text)
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
 
 def _sanitize_ipa(raw: str) -> str | None:
     """Clean model output to bare IPA, or ``None`` if implausible.
@@ -119,6 +133,8 @@ def _sanitize_ipa(raw: str) -> str | None:
             first_line = line
             break
     text = first_line
+
+    text = _strip_leaked_graphemes(text)
 
     # 6. Plausibility check -> reject to None.
     if not text:
@@ -176,7 +192,7 @@ def gemma_ipa(name: str) -> str | None:
     try:
         import httpx
     except ImportError:
-        return None
+      return None
 
     try:
         with httpx.Client(timeout=10.0) as client:

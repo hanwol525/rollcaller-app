@@ -1,68 +1,65 @@
-"""Audio-to-IPA recognition using Allosaurus.
+"""Audio-to-IPA recognition using a wav2vec2 phoneme model.
 
-Loaded lazily; a fallback returns a pseudo-IPA when Allosaurus isn't installed
-so tests can exercise the full pipeline without the heavy ML stack.
+Loaded lazily; a fallback returns a pseudo-IPA when transformers/the model
+aren't available so tests can exercise the pipeline without the ML stack.
 """
 from __future__ import annotations
 
 import io
 
-# ---------------------------------------------------------------------------
-# Warm instance
-# ---------------------------------------------------------------------------
-_recognizer = None  # type: ignore[var-annotated]
+# Turns audio directly into IPA phonemes (English, espeak-style IPA).
+_MODEL_ID = "facebook/wav2vec2-lv-60-espeak-cv-ft"
+
+_processor = None  # type: ignore[var-annotated]
+_model = None      # type: ignore[var-annotated]
 
 
 def warm() -> None:
-    """Pre-load the Allosaurus recognizer. Called once at app startup."""
-    global _recognizer
+    """Pre-load the wav2vec2 phoneme model + processor once at app startup."""
+    global _processor, _model
     try:
-        from allosaurus.app import read_recognizer
-        _recognizer = read_recognizer()
+        from transformers import AutoProcessor, AutoModelForCTC
+        _processor = AutoProcessor.from_pretrained(_MODEL_ID)
+        _model = AutoModelForCTC.from_pretrained(_MODEL_ID)
     except Exception:
-        _recognizer = None
+        _processor = None
+        _model = None
 
 
 def recognize(wav_bytes: bytes) -> str:
     """Recognize IPA from a WAV audio bytes blob."""
-    if _recognizer is not None:
+    if _processor is not None and _model is not None:
         try:
+            import numpy as np
             import soundfile as sf
-            # Allosaurus wants a path or a file-like; use BytesIO.
-            audio, sr = sf.read(io.BytesIO(wav_bytes))
-            # Write to a temp wav Allosaurus can read
-            import tempfile, os
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                sf.write(tmp.name, audio, sr)
-                tmp_path = tmp.name
-            try:
-                # English phone inventory. The universal default emits symbols
-                # from every language, most outside Kokoro's vocab — the source
-                # of the garbled TTS output.
-                result = _recognizer.recognize(tmp_path, lang_id="eng")
-            finally:
-                os.unlink(tmp_path)
-            return _clean_phones(str(result))
+            import torch
+
+            # The transcode step already emits 16 kHz mono WAV; read it and
+            # guard against stereo just in case (a (N,2) array breaks the model).
+            audio, _sr = sf.read(io.BytesIO(wav_bytes))
+            if getattr(audio, "ndim", 1) > 1:
+                audio = audio.mean(axis=1)
+            audio = np.asarray(audio, dtype="float32")
+
+            inputs = _processor(
+                audio, sampling_rate=16000, return_tensors="pt", padding=True
+            )
+            with torch.no_grad():
+                logits = _model(inputs.input_values).logits
+            phonemes = _processor.batch_decode(torch.argmax(logits, dim=-1))
+            return _clean_phones(phonemes[0] if phonemes else "")
         except Exception:
             pass
     return _fallback(wav_bytes)
 
 
 def _clean_phones(raw: str) -> str:
-    """Collapse Allosaurus's space-separated phones into a continuous IPA
-    string Kokoro's pronunciation-override markup can read.
-
-    Allosaurus emits one space between every phone (`t ɑ m`); Kokoro wants
-    them joined (`tɑm`).
-    """
+    """Collapse the model's space-separated phones into a continuous IPA
+    string Kokoro's markup can read (`t ɑː m` -> `tɑːm`)."""
     return "".join(raw.split())
 
 
 def _fallback(wav_bytes: bytes) -> str:
-    """Placeholder IPA for dev/test without Allosaurus.
-
-    Returns a deterministic pseudo-IPA based on the byte length so different
-    recordings yield different (but stable) strings.
-    """
+    """Placeholder IPA for dev/test without the model. Deterministic by length."""
     length = len(wav_bytes)
     return f"/rec{length % 1000:03d}/"
