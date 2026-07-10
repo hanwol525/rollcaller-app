@@ -167,18 +167,19 @@ spec:
       protocol: TCP
       name: http
 ---
-# Backend-only ingress. Routes the whole host to the API for now. When the
-# frontend ships, split: `/` -> frontend and keep `/auth`, `/invite`, `/media`
-# -> rollcaller-backend. letsencrypt-prod uses HTTP-01, so the Cloud DNS A
-# record (created/ensured by CI) must exist before the cert can issue.
+# Shared ingress — nginx longest-prefix match routes browser-direct API
+# prefixes (/auth, /invite) to the backend and everything else (/) to the
+# frontend. /spaces API calls are SSR-only (in-cluster, never through the
+# ingress). /media is served via presigned GCS URLs in prod (no ingress rule).
+# letsencrypt-prod uses HTTP-01, so the Cloud DNS A record (ensured by CI)
+# must exist before the cert can issue.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: rollcaller-backend
+  name: rollcaller
   namespace: rollcall
   labels:
     app.kubernetes.io/name: rollcaller
-    app.kubernetes.io/component: backend
     app.kubernetes.io/part-of: rollcaller
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt-prod
@@ -193,10 +194,24 @@ spec:
     - host: rollcall.jonathansilverstein.us
       http:
         paths:
-          - path: /
+          - path: /auth
             pathType: Prefix
             backend:
               service:
                 name: rollcaller-backend
                 port:
                   number: 8000
+          - path: /invite
+            pathType: Prefix
+            backend:
+              service:
+                name: rollcaller-backend
+                port:
+                  number: 8000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: rollcaller-frontend
+                port:
+                  number: 3000

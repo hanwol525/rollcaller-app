@@ -25,9 +25,9 @@
 # 3. GCS bucket for audio blobs + S3-interoperable HMAC keys:
 #      gcloud storage buckets create gs://rollcaller-media \
 #        --project=personal-project-289714 --location=us-central1
-#      gcloud storage hmac keys create --project=personal-project-289714 \
-#        --service-account=<an SA email or your account>
-#      # capture the Access Key + Secret from the output
+#      gcloud storage hmac create --project=personal-project-289714 \
+#        --service-account=rollcaller-runtime@personal-project-289714.iam.gserviceaccount.com
+#      # capture the Access Key ID + Secret from the output
 #
 # 4. Runtime Workload Identity (pod -> Cloud SQL):
 #      gcloud iam service-accounts create rollcaller-runtime \
@@ -92,9 +92,9 @@
 #   DNS_ZONE_NAME         — personal-website (Cloud DNS zone for jonathansilverstein.us; defaulted below)
 # ----------------------------------------------------------------------------
 #
-# Frontend: NOT deployed yet (frontend/src/lib/server.ts is missing — the
-# SvelteKit build fails). When it lands, enable the `frontend` job below
-# (adapter-node image, second Deployment/Service, and split the ingress).
+# Frontend: SvelteKit SSR (adapter-node). The frontend SSR server calls the
+# backend in-cluster via BACKEND_URL env var. Browser-direct API calls
+# (/auth, /invite) route to the backend through the shared nginx ingress.
 
 name: Deploy RollCaller
 
@@ -103,6 +103,7 @@ on:
     branches: [main]
     paths:
       - 'backend/**'
+      - 'frontend/**'
       - 'infra/k8s/**'
       - '.github/workflows/deploy.yml'
   workflow_dispatch:
@@ -186,7 +187,7 @@ jobs:
   # 2. Deploy to GKE + ensure the Cloud DNS A record
   # ---------------------------------------------------------------------------
   deploy:
-    needs: build-backend
+    needs: [build-backend, build-frontend]
     runs-on: ubuntu-latest
     environment: production
     permissions:
@@ -216,8 +217,9 @@ jobs:
           kubectl apply -f infra/k8s/namespace.yaml
           kubectl apply -f infra/k8s/service-account.yaml
           kubectl apply -f infra/k8s/backend-deployment.yaml
+          kubectl apply -f infra/k8s/frontend-deployment.yaml
 
-      - name: Update image tag
+      - name: Update backend image tag
         env:
           IMAGE: ${{ needs.build-backend.outputs.image }}
           TAG: ${{ needs.build-backend.outputs.tag }}
@@ -226,11 +228,25 @@ jobs:
             backend="${IMAGE}:${TAG}" \
             -n rollcall
 
-      - name: Wait for rollout
+      - name: Update frontend image tag
+        env:
+          IMAGE: ${{ needs.build-frontend.outputs.image }}
+          TAG: ${{ needs.build-frontend.outputs.tag }}
+        run: |
+          kubectl set image deployment/rollcaller-frontend \
+            frontend="${IMAGE}:${TAG}" \
+            -n rollcall
+
+      - name: Wait for backend rollout
         # startupProbe grants 360s for first-run ML model downloads; allow more.
         run: |
           kubectl rollout status deployment/rollcaller-backend \
             -n rollcall --timeout=600s
+
+      - name: Wait for frontend rollout
+        run: |
+          kubectl rollout status deployment/rollcaller-frontend \
+            -n rollcall --timeout=120s
 
       - name: Ensure Cloud DNS A record for rollcall.jonathansilverstein.us
         env:
@@ -272,17 +288,56 @@ jobs:
             echo "not reachable yet from the runner — check from a browser once DNS propagates"
 
   # ---------------------------------------------------------------------------
-  # 3. Frontend — DISABLED until frontend/src/lib/server.ts exists.
-  #    When the SvelteKit build passes, enable this job: build the adapter-node
-  #    image, apply a frontend Deployment/Service, and split the ingress so
-  #    `/` -> frontend and `/auth`, `/invite`, `/media` -> rollcaller-backend.
+  # 3. Build and push the frontend Docker image
   # ---------------------------------------------------------------------------
   build-frontend:
-    if: false  # TODO(frontend): remove when $lib/server lands
     runs-on: ubuntu-latest
     environment: production
     permissions:
       contents: read
       id-token: write
+    outputs:
+      image: ${{ steps.femeta.outputs.image }}
+      tag: ${{ steps.femeta.outputs.tag }}
     steps:
-      - run: echo "frontend deploy pending frontend/src/lib/server.ts"
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@955352c3b43196640b567e4646256d2fbb4aa1c7 # v1
+        with:
+          token_format: access_token
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT_EMAIL }}
+          audience: https://github.com/${{ github.repository_owner }}
+
+      - name: Login to Artifact Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.GCP_REGION }}-docker.pkg.dev
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - name: Set image metadata
+        id: femeta
+        run: |
+          IMAGE="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REGISTRY_REPO}/rollcaller-frontend"
+          TAG="${GITHUB_SHA::7}"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        with:
+          context: frontend
+          file: frontend/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.femeta.outputs.image }}:${{ steps.femeta.outputs.tag }}
+            ${{ steps.femeta.outputs.image }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
