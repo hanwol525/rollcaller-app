@@ -72,7 +72,9 @@ def synthesize(text: str, ipa: str | None = None) -> bytes:
 
     attempts: list[str] = []
     if ipa:
-        attempts.append(f"[{text}](/{ipa}/)")  # faithful IPA — override pronunciation
+      bare_ipa = ipa.strip().strip("/[]").strip()  # gemma_ipa returns /.../ — strip to bare
+      if bare_ipa:
+          attempts.append(f"[{text}](/{bare_ipa}/)")  # faithful IPA — override pronunciation
     attempts.append(text)  # plain name — Kokoro's own G2P
     folded = _ascii_fold(text)
     if folded and folded != text:

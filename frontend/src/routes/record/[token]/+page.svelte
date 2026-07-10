@@ -194,7 +194,11 @@ Re-record
 <p class="recording-name">Say your name clearly</p>
 <button onclick={handleStop} class="btn-stop">Stop</button>
 {:else if uploading}
-<p class="loading-text">Uploading & processing…</p>
+      <p class="loading-text">Uploading & processing…</p>
+    {:else}
+      <p class="recording-name">Ready to re-record your name?</p>
+      {#if micError}<p class="error-msg">{micError}</p>{/if}
+      <button onclick={handleRecord} class="btn-record">Start Recording</button>
 {/if}
 </div>
 
