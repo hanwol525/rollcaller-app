@@ -36,13 +36,26 @@ def recognize(wav_bytes: bytes) -> str:
                 sf.write(tmp.name, audio, sr)
                 tmp_path = tmp.name
             try:
-                result = _recognizer.recognize(tmp_path)
+                # English phone inventory. The universal default emits symbols
+                # from every language, most outside Kokoro's vocab — the source
+                # of the garbled TTS output.
+                result = _recognizer.recognize(tmp_path, lang_id="eng")
             finally:
                 os.unlink(tmp_path)
-            return str(result).strip()
+            return _clean_phones(str(result))
         except Exception:
             pass
     return _fallback(wav_bytes)
+
+
+def _clean_phones(raw: str) -> str:
+    """Collapse Allosaurus's space-separated phones into a continuous IPA
+    string Kokoro's pronunciation-override markup can read.
+
+    Allosaurus emits one space between every phone (`t ɑ m`); Kokoro wants
+    them joined (`tɑm`).
+    """
+    return "".join(raw.split())
 
 
 def _fallback(wav_bytes: bytes) -> str:
