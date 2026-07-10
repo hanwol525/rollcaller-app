@@ -1,9 +1,16 @@
-"""Grapheme-to-phoneme conversion using Espeak NG via the `phonemizer` library.
+"""Grapheme-to-phoneme conversion for the g2p fallback path.
 
-Loaded lazily so the heavy dependency isn't required for tests. A lightweight
-fallback returns a simple pseudo-IPA when phonemizer/espeak aren't available.
+The primary engine is Gemma 4 (called over an OpenAI-compatible endpoint);
+eSpeak NG via the `phonemizer` library is the fallback floor. Both run only at
+prep-clips time, never in the live ceremony path.
+
+The public entry point ``g2p(text)`` preserves the signature all existing
+callers expect. The result is still tagged ``IpaSource.g2p`` upstream — the
+engine behind it is an implementation detail.
 """
 from __future__ import annotations
+
+from app.pronunciation.gemma import gemma_ipa
 
 # ---------------------------------------------------------------------------
 # Warm instance (loaded once at startup by the orchestrator)
@@ -12,7 +19,10 @@ _backend = None  # type: ignore[var-annotated]
 
 
 def warm() -> None:
-    """Pre-load the phonemizer backend. Called once at app startup."""
+    """Pre-load the phonemizer backend. Called once at app startup.
+
+    Gemma is a stateless HTTP call, so there is nothing to warm for it.
+    """
     global _backend
     try:
         from phonemizer import backend as _b
@@ -27,7 +37,23 @@ def warm() -> None:
 
 
 def g2p(text: str) -> str:
-    """Convert a grapheme string (a name) to an IPA string."""
+    """Convert a grapheme string (a name) to an IPA string.
+
+    Tries Gemma 4 first; on any failure (missing config, network error,
+    timeout, empty/implausible output) ``gemma_ipa`` returns ``None`` and we
+    fall through to the eSpeak floor. The signature is unchanged from the
+    original rule-based g2p, so all callers (orchestrator, ceremony renderer)
+    keep working with no edits.
+    """
+    return gemma_ipa(text) or espeak_ipa(text)
+
+
+def espeak_ipa(text: str) -> str:
+    """eSpeak NG grapheme-to-phoneme — the fallback floor.
+
+    Produces IPA in the same bracketing/spacing convention the pipeline has
+    always used, so ``gemma_ipa`` is a literal drop-in for this function.
+    """
     if _backend is not None:
         try:
             result = _backend.phonemize([text], strip=True)

@@ -161,13 +161,11 @@ class TestPronunciationFallbacks:
         assert len(result) > 0
         assert isinstance(result, str)
 
-    def test_tts_fallback_returns_wav_bytes(self):
+    def test_synthesize_raises_when_pipeline_unavailable(self):
+        """Without Kokoro loaded, synthesize must raise — no silent tone fallback."""
         from app.pronunciation.tts import synthesize
-        result = synthesize("Alice", ipa="/ælɪs/")
-        assert isinstance(result, bytes)
-        assert len(result) > 0
-        # WAV files start with RIFF header
-        assert result[:4] == b"RIFF"
+        with pytest.raises(RuntimeError):
+            synthesize("Alice", ipa="/ælɪs/")
 
     def test_orchestrator_g2p_name(self):
         from app.pronunciation.orchestrator import g2p_name
@@ -175,11 +173,11 @@ class TestPronunciationFallbacks:
         assert isinstance(result, str)
         assert len(result) > 0
 
-    def test_orchestrator_render_clip(self):
+    def test_orchestrator_render_clip_raises_when_pipeline_unavailable(self):
+        """Without Kokoro loaded, render_clip must raise — no silent tone fallback."""
         from app.pronunciation.orchestrator import render_clip
-        result = render_clip("Bob", ipa_text="/bɒb/")
-        assert isinstance(result, bytes)
-        assert len(result) > 0
+        with pytest.raises(RuntimeError):
+            render_clip("Bob", ipa_text="/bɒb/")
 
     def test_orchestrator_recognize_recording(self):
         from app.pronunciation.orchestrator import recognize_recording

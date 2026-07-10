@@ -105,9 +105,9 @@
 			</tr>
 		</thead>
 		<tbody>
-			{#each data.participants as p (p.id)}
+			{#each data.participants as p, i (p.id)}
 				<tr>
-					<td class="pos">{p.position}</td>
+					<td class="pos">{i + 1}</td>
 					<td>{p.name}</td>
 					<td class="email">{p.email ?? '—'}</td>
 					<td><span class="badge badge-{p.status}">{statusLabels[p.status]}</span></td>
@@ -121,13 +121,13 @@
 							<input type="hidden" name="pid" value={p.id} />
 							<input type="hidden" name="direction" value="up" />
 							<input type="hidden" name="currentPos" value={p.position} />
-							<button type="submit" class="arrow-btn" disabled={p.position <= 1}>↑</button>
+							<button type="submit" class="arrow-btn" disabled={i === 0}>↑</button>
 						</form>
 						<form method="POST" action="?/reorder" class="inline-form">
 							<input type="hidden" name="pid" value={p.id} />
 							<input type="hidden" name="direction" value="down" />
 							<input type="hidden" name="currentPos" value={p.position} />
-							<button type="submit" class="arrow-btn" disabled={p.position >= data.participants.length}>↓</button>
+							<button type="submit" class="arrow-btn" disabled={i === data.participants.length - 1}>↓</button>
 						</form>
 					</td>
 					<td>

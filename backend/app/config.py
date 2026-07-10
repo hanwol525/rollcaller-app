@@ -36,6 +36,16 @@ class Settings(BaseSettings):
     # Base URL for media keys in dev (used by storage.url())
     media_base_url: str = "/media"
 
+    # --- Gemma g2p fallback (optional; prep-clips only, never live) ---
+    # OpenAI-compatible base URL + model id + key. Fireworks today; the partner
+    # repoints GEMMA_BASE_URL / GEMMA_MODEL at their self-hosted AMD/vLLM
+    # endpoint later. If any of the three is unset, gemma_ipa() returns None
+    # immediately and the eSpeak floor is used (lets the app run before the
+    # AMD box exists).
+    gemma_base_url: str | None = None
+    gemma_model: str | None = None
+    gemma_api_key: str | None = None
+
 
 settings = Settings()
 

@@ -1,75 +1,92 @@
 """Text-to-speech using Kokoro 82M (CPU).
 
-Loaded lazily; a fallback generates a deterministic sine-wave WAV when Kokoro
-isn't installed so tests can exercise the full pipeline without the ML stack.
+Loaded lazily. Synthesis feeds IPA via Kokoro's inline pronunciation-override
+markup — `[name](/ipa/)` — and falls back to plain text / ASCII-folded text
+before failing loud. A broken render raises; it never emits a synthetic tone.
 """
 from __future__ import annotations
 
 import io
-import math
-import struct
-import wave
+import logging
+import unicodedata
+
+import numpy as np
+import soundfile as sf
+
+log = logging.getLogger(__name__)
+
+# Kokoro 82M outputs at a fixed 24000 Hz sample rate.
+_KOKORO_SAMPLE_RATE = 24000
 
 # ---------------------------------------------------------------------------
 # Warm instance
 # ---------------------------------------------------------------------------
-_tts = None  # type: ignore[var-annotated]
+_pipeline = None  # type: ignore[var-annotated]
 
 
 def warm() -> None:
-    """Pre-load the Kokoro TTS model. Called once at app startup."""
-    global _tts
+    """Pre-load the Kokoro TTS pipeline. Called once at app startup."""
+    global _pipeline
     try:
-        from kokoro import Kokoro  # type: ignore[import-not-found]
-        _tts = Kokoro()
-    except Exception:
-        _tts = None
+        from kokoro import KPipeline  # type: ignore[import-not-found]
+        _pipeline = KPipeline(lang_code="a")  # American English
+    except Exception as e:
+        log.warning("Kokoro warm failed: %s", e)
+        _pipeline = None
+
+
+def _ascii_fold(s: str) -> str:
+    """Strip diacritics to an ASCII-only form (last-ditch espeak-friendly)."""
+    return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii").strip()
+
+
+def _kokoro_wav(source: str) -> bytes | None:
+    """Run one Kokoro pass on `source`; return WAV bytes, or None if no audio."""
+    parts = []
+    for _gs, _ps, audio in _pipeline(source, voice="af_heart"):
+        a = audio.detach().cpu().numpy() if hasattr(audio, "detach") else np.asarray(audio)
+        parts.append(a)
+    if not parts:
+        return None
+    audio = np.concatenate(parts)
+    buf = io.BytesIO()
+    sf.write(buf, audio, _KOKORO_SAMPLE_RATE, format="WAV")
+    return buf.getvalue()
 
 
 def synthesize(text: str, ipa: str | None = None) -> bytes:
-    """Synthesize speech from text or IPA. Returns WAV bytes.
+    """Synthesize speech for a name, preferring an IPA pronunciation override.
 
-    If `ipa` is provided we attempt to feed it to Kokoro's phoneme input;
-    otherwise we fall back to grapheme input via `text`.
+    Attempts, in order:
+      1. `[{name}](/{ipa}/)` — faithful IPA via Kokoro's inline markup (if ipa),
+      2. `{name}`            — plain text, Kokoro's own G2P,
+      3. ASCII-folded `{name}` — diacritics stripped (only if it differs).
+
+    Returns WAV bytes from the first attempt that yields audio. If none do,
+    raises RuntimeError — never emits a silent tone.
     """
-    if _tts is not None:
+    if _pipeline is None:
+        raise RuntimeError(
+            "Kokoro pipeline not loaded — cannot synthesize (check venv / model weights)."
+        )
+
+    attempts: list[str] = []
+    if ipa:
+        attempts.append(f"[{text}](/{ipa}/)")  # faithful IPA — override pronunciation
+    attempts.append(text)  # plain name — Kokoro's own G2P
+    folded = _ascii_fold(text)
+    if folded and folded != text:
+        attempts.append(folded)  # last-ditch, diacritics stripped
+
+    last_err: Exception | None = None
+    for source in attempts:
         try:
-            # Kokoro's API: generate from text or phonemes.
-            # We prefer IPA when available for faithful pronunciation.
-            if ipa:
-                out = _tts.create(ipa, lang="en-us")
-            else:
-                out = _tts.create(text, lang="en-us")
-            # Kokoro returns a numpy array + sample rate; convert to WAV bytes.
-            import numpy as np
-            import soundfile as sf
-            buf = io.BytesIO()
-            audio = out.audio if hasattr(out, "audio") else out[0]
-            sr = out.sample_rate if hasattr(out, "sample_rate") else out[1]
-            sf.write(buf, audio, sr, format="WAV")
-            return buf.getvalue()
-        except Exception:
-            pass
-    return _fallback(text, ipa)
+            wav = _kokoro_wav(source)
+            if wav:
+                return wav
+        except Exception as e:
+            last_err = e
+            log.warning("Kokoro attempt failed (source=%r): %s", source, e)
 
-
-def _fallback(text: str, ipa: str | None = None) -> bytes:
-    """Generate a short deterministic sine-wave WAV for dev/test.
-
-    The tone frequency is derived from the input length so different names
-    produce different (but stable) audio.
-    """
-    freq = 220.0 + (len(text) % 20) * 10
-    sample_rate = 16000
-    duration = 0.5
-    n_samples = int(sample_rate * duration)
-
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)  # 16-bit
-        w.setframerate(sample_rate)
-        for i in range(n_samples):
-            sample = int(16000 * math.sin(2 * math.pi * freq * (i / sample_rate)))
-            w.writeframes(struct.pack("<h", sample))
-    return buf.getvalue()
+    # No silent tone. Fail loud so a broken render is visible.
+    raise RuntimeError(f"Kokoro produced no audio for name={text!r} ipa={ipa!r}") from last_err
