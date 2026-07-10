@@ -5,112 +5,118 @@
 
 	const ceremony = $derived(data.ceremony);
 	const roster = $derived(ceremony.roster);
+	const secondsBetweenNames = $derived(ceremony.advanced_seconds);
 
 	let currentIndex = $state(0);
 	let isPlaying = $state(false);
 	let audioEl: HTMLAudioElement | null = $state(null);
 	let advanceTimer: ReturnType<typeof setTimeout> | null = null;
+	let srcInit = false;
 
 	const currentItem = $derived(roster[currentIndex] ?? null);
 	const isFinished = $derived(currentIndex >= roster.length);
 	const notPrepped = $derived(roster.length > 0 && roster.every((r) => r.clip_url === null));
 
-	// Reactively set the audio src when the current item changes
+	// Initialize the audio element's src once when the roster loads.
+	// After that, goTo() owns src — this effect must not fire again.
 	$effect(() => {
-		if (audioEl && currentItem) {
-			if (currentItem.clip_url) {
-				audioEl.src = currentItem.clip_url;
-			} else {
-				audioEl.removeAttribute('src');
-			}
+		if (!srcInit && audioEl && roster.length > 0) {
+			const item = roster[currentIndex] ?? roster[0];
+			if (item?.clip_url) audioEl.src = item.clip_url;
+			srcInit = true;
 		}
 	});
 
-	function goTo(index: number) {
-		// Clamp index
-		const clamped = Math.max(0, Math.min(index, roster.length - 1));
+	function cancelAdvance() {
 		if (advanceTimer) {
 			clearTimeout(advanceTimer);
 			advanceTimer = null;
 		}
-		if (audioEl) {
-			audioEl.pause();
-			audioEl.currentTime = 0;
-		}
-		currentIndex = clamped;
 	}
 
-	function playCurrent() {
-		if (!currentItem || !audioEl) return;
+	function armAdvance() {
+		cancelAdvance();
+		if (secondsBetweenNames > 0 && currentIndex < roster.length - 1) {
+			advanceTimer = setTimeout(() => {
+				goTo(currentIndex + 1);
+			}, secondsBetweenNames * 1000);
+		}
+	}
 
-		if (!currentItem.clip_url) {
-			// No clip to play — if auto-advance, schedule the advance directly
-			isPlaying = false;
-			if (ceremony.advanced_seconds > 0) {
-				advanceTimer = setTimeout(() => {
-					if (currentIndex < roster.length - 1) {
-						goTo(currentIndex + 1);
-						playCurrent();
-					} else {
-						currentIndex = roster.length;
-					}
-				}, ceremony.advanced_seconds * 1000);
-			}
+	function handleEnded() {
+		// Clip finished. Do NOT advance immediately.
+		if (currentIndex >= roster.length - 1) {
+			currentIndex = roster.length; // last item → ceremony complete
+			return;
+		}
+		if (secondsBetweenNames > 0) {
+			armAdvance(); // auto-advance ON: wait advanced_seconds, THEN goTo(currentIndex + 1)
+		}
+		// auto-advance OFF (0): stay on this name; user advances manually
+	}
+
+	function goTo(index: number) {
+		// Past the end → ceremony complete
+		if (index >= roster.length) {
+			cancelAdvance();
+			if (audioEl) audioEl.pause();
+			currentIndex = roster.length;
 			return;
 		}
 
-		isPlaying = true;
-		audioEl.play().catch(() => {
-			isPlaying = false;
-		});
-	}
+		const clamped = Math.max(0, Math.min(index, roster.length - 1));
+		const item = roster[clamped];
 
-	function onEnded() {
-		isPlaying = false;
-		// Auto-advance after advanced_seconds delay
-		if (ceremony.advanced_seconds > 0) {
-			advanceTimer = setTimeout(() => {
-				if (currentIndex < roster.length - 1) {
-					goTo(currentIndex + 1);
-					playCurrent();
-				} else {
-					// Finished
-					currentIndex = roster.length;
-				}
-			}, ceremony.advanced_seconds * 1000);
+		// 1. Cancel any pending auto-advance timer
+		cancelAdvance();
+
+		// 2. Set src (only if clip is changing) — pause first so onpause fires
+		if (clamped !== currentIndex && audioEl) {
+			audioEl.pause();
+			if (item.clip_url) {
+				audioEl.src = item.clip_url;
+			} else {
+				audioEl.removeAttribute('src');
+			}
+		}
+
+		// 3. Play (if there's a clip)
+		if (audioEl && item.clip_url) {
+			audioEl.play().catch((e) => console.warn(e));
+		}
+
+		// 4. Update index
+		currentIndex = clamped;
+
+		// No clip → onplay won't fire, so arm advance directly
+		if (!item.clip_url && secondsBetweenNames > 0 && clamped < roster.length - 1) {
+			armAdvance();
 		}
 	}
 
 	function togglePlay() {
-		if (isPlaying) {
-			if (audioEl) audioEl.pause();
-			isPlaying = false;
-			if (advanceTimer) {
-				clearTimeout(advanceTimer);
-				advanceTimer = null;
-			}
+		if (!audioEl) return;
+		if (audioEl.paused) {
+			audioEl.play().catch((e) => console.warn(e));
 		} else {
-			playCurrent();
+			audioEl.pause();
 		}
 	}
 
 	function next() {
 		if (currentIndex < roster.length - 1) {
 			goTo(currentIndex + 1);
-			if (isPlaying) playCurrent();
 		}
 	}
 
 	function prev() {
 		if (currentIndex > 0) {
 			goTo(currentIndex - 1);
-			if (isPlaying) playCurrent();
 		}
 	}
 
 	function restart() {
 		goTo(0);
-		isPlaying = false;
 	}
 </script>
 
@@ -159,8 +165,15 @@
 				</div>
 			{/if}
 
-			<!-- Persistent audio element — always in the DOM, src set reactively -->
-			<audio bind:this={audioEl} onended={onEnded} preload="auto"></audio>
+		<!-- Persistent audio element — always in the DOM, events drive state -->
+		<audio
+			bind:this={audioEl}
+			onplay={() => { isPlaying = true; }}
+			onplaying={() => { isPlaying = true; }}
+			onpause={() => { isPlaying = false; cancelAdvance(); }}
+			onended={() => { isPlaying = false; handleEnded(); }}
+			preload="auto"
+		></audio>
 
 			{#if ceremony.advanced_seconds > 0}
 				<div class="auto-advance-note">
