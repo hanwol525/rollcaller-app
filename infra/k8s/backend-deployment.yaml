@@ -56,25 +56,12 @@ spec:
                 secretKeyRef:
                   name: rollcaller-db
                   key: database_url
-            # Object storage: GCS via S3 interoperability (HMAC keys).
+            # Object storage: native GCS via Workload Identity (ADC).
+            # No HMAC keys — the pod's GSA has roles/storage.objectAdmin on the bucket.
             - name: STORAGE_BACKEND
-              value: "minio"
-            - name: S3_ENDPOINT
-              value: "https://storage.googleapis.com"
-            - name: S3_BUCKET
+              value: "gcs"
+            - name: GCS_BUCKET
               value: "rollcaller-media"
-            - name: S3_SECURE
-              value: "true"
-            - name: S3_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: rollcaller-gcs
-                  key: s3_access_key
-            - name: S3_SECRET_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: rollcaller-gcs
-                  key: s3_secret_key
             # Seeded organizer + session signing secret.
             - name: ORGANIZER_USERNAME
               valueFrom:

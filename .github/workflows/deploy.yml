@@ -18,30 +18,40 @@
 #        --project=personal-project-289714
 #      gcloud sql users create rollcaller --instance=automation-db-v2 \
 #        --password='<strong-password>' --project=personal-project-289714
-#    Store the password in Secret Manager:
-#      printf '<strong-password>' | gcloud secrets create rollcaller-db-password \
-#        --data-file=- --project=personal-project-289714
 #
-# 3. GCS bucket for audio blobs + S3-interoperable HMAC keys:
+# 3. GCS bucket for audio blobs (native GCS, no HMAC keys needed):
 #      gcloud storage buckets create gs://rollcaller-media \
 #        --project=personal-project-289714 --location=us-central1
-#      gcloud storage hmac create --project=personal-project-289714 \
-#        --service-account=rollcaller-runtime@personal-project-289714.iam.gserviceaccount.com
-#      # capture the Access Key ID + Secret from the output
 #
-# 4. Runtime Workload Identity (pod -> Cloud SQL):
+# 4. Store secrets in GCP Secret Manager (the CI pipeline syncs these into K8s
+#    on each deploy — no manual kubectl create secret needed):
+#      DB_PW='<the password from step 2>'
+#      printf "postgresql+psycopg2://rollcaller:${DB_PW}@localhost:5432/rollcaller" \
+#        | gcloud secrets create rollcaller-db-url --data-file=- \
+#        --project=personal-project-289714
+#      printf '<organizer-username>' | gcloud secrets create rollcaller-organizer-username \
+#        --data-file=- --project=personal-project-289714
+#      printf '<organizer-password>' | gcloud secrets create rollcaller-organizer-password \
+#        --data-file=- --project=personal-project-289714
+#      openssl rand -hex 32 | gcloud secrets create rollcaller-session-secret \
+#        --data-file=- --project=personal-project-289714
+#
+# 5. Runtime Workload Identity (pod -> Cloud SQL + GCS):
 #      gcloud iam service-accounts create rollcaller-runtime \
 #        --project=personal-project-289714
 #      gcloud projects add-iam-policy-binding personal-project-289714 \
 #        --member=serviceAccount:rollcaller-runtime@personal-project-289714.iam.gserviceaccount.com \
 #        --role=roles/cloudsql.client
+#      gcloud projects add-iam-policy-binding personal-project-289714 \
+#        --member=serviceAccount:rollcaller-runtime@personal-project-289714.iam.gserviceaccount.com \
+#        --role=roles/storage.objectAdmin
 #      # Bind the KSA (after applying service-account.yaml once):
 #      gcloud iam service-accounts add-iam-policy-binding \
 #        rollcaller-runtime@personal-project-289714.iam.gserviceaccount.com \
 #        --member="serviceAccount:personal-project-289714.svc.id.goog[rollcall/rollcaller]" \
 #        --role=roles/iam.workloadIdentityUser --project=personal-project-289714
 #
-# 5. CI Workload Identity (GitHub Actions -> GCP). Create a CI SA and a WIF
+# 6. CI Workload Identity (GitHub Actions -> GCP). Create a CI SA and a WIF
 #    provider scoped to repo hanwol525/rollcaller-app (least privilege):
 #      gcloud iam service-accounts create rollcaller-ci --project=personal-project-289714
 #      gcloud projects add-iam-policy-binding personal-project-289714 \
@@ -53,6 +63,10 @@
 #      gcloud projects add-iam-policy-binding personal-project-289714 \
 #        --member=serviceAccount:rollcaller-ci@personal-project-289714.iam.gserviceaccount.com \
 #        --role=roles/dns.admin
+#      # CI needs to read Secret Manager to sync secrets into K8s:
+#      gcloud projects add-iam-policy-binding personal-project-289714 \
+#        --member=serviceAccount:rollcaller-ci@personal-project-289714.iam.gserviceaccount.com \
+#        --role=roles/secretmanager.secretAccessor
 #      # WIF provider (attribute condition: repository == 'hanwol525/rollcaller-app'):
 #      gcloud iam workload-identity-pools create github --location=global \
 #        --project=personal-project-289714
@@ -68,17 +82,10 @@
 #        --role=roles/iam.workloadIdentityUser --project=personal-project-289714
 #    Set the WIF provider full name as GCP_WORKLOAD_IDENTITY_PROVIDER.
 #
-# 6. Create the K8s secrets once (see infra/k8s/secrets.example.yaml), e.g.:
+# 7. Apply namespace + service-account.yaml once (the CI pipeline syncs all
+#    K8s secrets from Secret Manager on each deploy — no manual secret creation):
 #      kubectl apply -f infra/k8s/namespace.yaml
 #      kubectl apply -f infra/k8s/service-account.yaml
-#      kubectl create secret generic rollcaller-db -n rollcall \
-#        --from-literal=database_url="postgresql+psycopg2://rollcaller:<pw>@localhost:5432/rollcaller" \
-#        --from-literal=connection_name="personal-project-289714:us-central1:automation-db-v2"
-#      kubectl create secret generic rollcaller-gcs -n rollcall \
-#        --from-literal=s3_access_key=<access> --from-literal=s3_secret_key=<secret>
-#      kubectl create secret generic rollcaller-auth -n rollcall \
-#        --from-literal=organizer_username=<u> --from-literal=organizer_password=<p> \
-#        --from-literal=session_secret="$(openssl rand -hex 32)"
 #
 # Required GitHub Secrets:
 #   GCP_WORKLOAD_IDENTITY_PROVIDER  — full WIF provider resource name (step 5)
@@ -211,6 +218,31 @@ jobs:
           cluster_name: ${{ env.GKE_CLUSTER_NAME }}
           location: ${{ env.GCP_REGION }}
           project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Sync secrets from Secret Manager
+        # Fetch each secret value from GCP Secret Manager and create/update the
+        # K8s secret. This runs on every deploy so Secret Manager is the single
+        # source of truth — no manual kubectl create secret needed.
+        env:
+          GCP_PROJECT: ${{ env.GCP_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+
+          DB_URL="$(gcloud secrets versions access latest --secret=rollcaller-db-url --project="${GCP_PROJECT}")"
+          ORG_USER="$(gcloud secrets versions access latest --secret=rollcaller-organizer-username --project="${GCP_PROJECT}")"
+          ORG_PW="$(gcloud secrets versions access latest --secret=rollcaller-organizer-password --project="${GCP_PROJECT}")"
+          SESSION_SECRET="$(gcloud secrets versions access latest --secret=rollcaller-session-secret --project="${GCP_PROJECT}")"
+
+          kubectl create secret generic rollcaller-db -n rollcall \
+            --from-literal=database_url="${DB_URL}" \
+            --from-literal=connection_name="personal-project-289714:us-central1:automation-db-v2" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl create secret generic rollcaller-auth -n rollcall \
+            --from-literal=organizer_username="${ORG_USER}" \
+            --from-literal=organizer_password="${ORG_PW}" \
+            --from-literal=session_secret="${SESSION_SECRET}" \
+            --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Apply manifests
         run: |
