@@ -15,7 +15,7 @@ WORKDIR /app
 
 # Install Python deps first for better layer caching.
 COPY app/requirements.txt /app/app/requirements.txt
-RUN pip install --no-cache-dir -r /app/app/requirements.txt
+RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu -r /app/app/requirements.txt
 
 # Copy the application code.
 COPY app/ /app/app/

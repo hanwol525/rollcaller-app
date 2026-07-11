@@ -7,8 +7,9 @@ FROM node:20-slim AS builder
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
-# npm install (not ci) so the lock file regenerates with adapter-node
-RUN npm install
+# --ignore-scripts skips the prepare script (svelte-kit sync) which needs
+# svelte.config.js — not copied yet. Sync runs during `npm run build` instead.
+RUN npm install --ignore-scripts
 
 COPY . .
 RUN npm run build
