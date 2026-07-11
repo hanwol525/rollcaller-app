@@ -78,6 +78,23 @@ spec:
                 secretKeyRef:
                   name: rollcaller-auth
                   key: session_secret
+            # Gemma g2p fallback (optional; prep-clips only, never live).
+            # If any is unset, the app falls back to espeak.
+            - name: GEMMA_MODEL
+              valueFrom:
+                secretKeyRef:
+                  name: rollcaller-gemma
+                  key: gemma_model
+            - name: GEMMA_BASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: rollcaller-gemma
+                  key: gemma_base_url
+            - name: GEMMA_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: rollcaller-gemma
+                  key: gemma_api_key
           resources:
             # ML warmup (torch+cpu, Kokoro, Allosaurus) is CPU/memory heavy;
             # steady state is much lighter. Tune down after observing.

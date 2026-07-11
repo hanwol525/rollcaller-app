@@ -13,6 +13,9 @@ RUN npm install --ignore-scripts
 
 COPY . .
 RUN npm run build
+# Debug: find the server entry point
+RUN find /app/build -type f -name "*.js" 2>/dev/null | head -20 || echo "build/ empty or missing"
+RUN ls -la /app/build/ 2>/dev/null || echo "no build/ dir"
 
 FROM node:20-slim
 WORKDIR /app

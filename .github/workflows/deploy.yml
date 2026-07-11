@@ -239,6 +239,9 @@ jobs:
           ORG_USER="$(gcloud secrets versions access latest --secret=rollcaller-organizer-username --project="${GCP_PROJECT}")"
           ORG_PW="$(gcloud secrets versions access latest --secret=rollcaller-organizer-password --project="${GCP_PROJECT}")"
           SESSION_SECRET="$(gcloud secrets versions access latest --secret=rollcaller-session-secret --project="${GCP_PROJECT}")"
+          GEMMA_MODEL="$(gcloud secrets versions access latest --secret=rollcaller-model --project="${GCP_PROJECT}")"
+          GEMMA_BASE_URL="$(gcloud secrets versions access latest --secret=rollcaller-gemma-base --project="${GCP_PROJECT}")"
+          GEMMA_API_KEY="$(gcloud secrets versions access latest --secret=GEMMA_API_KEY --project="${GCP_PROJECT}")"
 
           kubectl create secret generic rollcaller-db -n rollcall \
             --from-literal=database_url="${DB_URL}" \
@@ -249,6 +252,12 @@ jobs:
             --from-literal=organizer_username="${ORG_USER}" \
             --from-literal=organizer_password="${ORG_PW}" \
             --from-literal=session_secret="${SESSION_SECRET}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl create secret generic rollcaller-gemma -n rollcall \
+            --from-literal=gemma_model="${GEMMA_MODEL}" \
+            --from-literal=gemma_base_url="${GEMMA_BASE_URL}" \
+            --from-literal=gemma_api_key="${GEMMA_API_KEY}" \
             --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Apply manifests
@@ -280,7 +289,7 @@ jobs:
         # startupProbe grants 360s for first-run ML model downloads; allow more.
         run: |
           kubectl rollout status deployment/rollcaller-backend \
-            -n rollcall --timeout=600s
+            -n rollcall --timeout=900s
 
       - name: Wait for frontend rollout
         run: |
