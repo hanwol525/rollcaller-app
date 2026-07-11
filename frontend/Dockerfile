@@ -13,9 +13,6 @@ RUN npm install --ignore-scripts
 
 COPY . .
 RUN npm run build
-# Debug: find where the adapter put the output
-RUN ls -la /app/build/ 2>/dev/null && ls -la /app/.output/ 2>/dev/null || true
-RUN find /app -maxdepth 3 -name "index.js" -path "*/server/*" 2>/dev/null || true
 
 FROM node:20-slim
 WORKDIR /app
