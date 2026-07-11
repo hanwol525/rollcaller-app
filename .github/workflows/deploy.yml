@@ -82,10 +82,13 @@
 #        rollcaller-ci@personal-project-289714.iam.gserviceaccount.com \
 #        --member="principalSet://iam.googleapis.com/projects/$(gcloud projects describe personal-project-289714 --format='value(projectNumber)')/locations/global/workloadIdentityPools/github/attribute.repository/hanwol525/rollcaller-app" \
 #        --role=roles/iam.workloadIdentityUser --project=personal-project-289714
-#    The WIF provider full name (set as GCP_WORKLOAD_IDENTITY_PROVIDER) is:
-#      projects/$(gcloud projects describe personal-project-289714 --format='value(projectNumber)')/locations/global/workloadIdentityPools/github/providers/github-hanwol525
-#        --role=roles/iam.workloadIdentityUser --project=personal-project-289714
-#    Set the WIF provider full name as GCP_WORKLOAD_IDENTITY_PROVIDER.
+#    Set the WIF provider full name as the GCP_WORKLOAD_IDENTITY_PROVIDER GitHub
+#    secret. It must be the FULL resource name with the project NUMBER (not ID):
+#      PROJ_NUM=$(gcloud projects describe personal-project-289714 --format='value(projectNumber)')
+#      echo "projects/${PROJ_NUM}/locations/global/workloadIdentityPools/github/providers/github-hanwol525"
+#    Verify the provider exists before setting the secret:
+#      gcloud iam workload-identity-pools providers describe github-hanwol525 \
+#        --workload-identity-pool=github --location=global --project=personal-project-289714
 #
 # 7. Apply namespace + service-account.yaml once (the CI pipeline syncs all
 #    K8s secrets from Secret Manager on each deploy — no manual secret creation):
