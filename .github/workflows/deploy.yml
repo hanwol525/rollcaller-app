@@ -67,18 +67,23 @@
 #      gcloud projects add-iam-policy-binding personal-project-289714 \
 #        --member=serviceAccount:rollcaller-ci@personal-project-289714.iam.gserviceaccount.com \
 #        --role=roles/secretmanager.secretAccessor
-#      # WIF provider (attribute condition: repository == 'hanwol525/rollcaller-app'):
+#      # WIF pool (may already exist if another repo set it up — create is
+#      # idempotent with || true):
 #      gcloud iam workload-identity-pools create github --location=global \
-#        --project=personal-project-289714
+#        --project=personal-project-289714 || true
+#      # WIF provider (attribute.condition gates which repos can impersonate):
 #      gcloud iam workload-identity-pools providers create-oidc github-hanwol525 \
 #        --workload-identity-pool=github --location=global \
 #        --project=personal-project-289714 \
 #        --issuer-uri=https://token.actions.githubusercontent.com \
-#        --attribute-mapping=google_subject=assertion.sub,repository=assertion.repository \
-#        --attribute-condition="repository == 'hanwol525/rollcaller-app'"
+#        --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository" \
+#        --attribute-condition="attribute.repository == 'hanwol525/rollcaller-app'"
 #      gcloud iam service-accounts add-iam-policy-binding \
 #        rollcaller-ci@personal-project-289714.iam.gserviceaccount.com \
 #        --member="principalSet://iam.googleapis.com/projects/$(gcloud projects describe personal-project-289714 --format='value(projectNumber)')/locations/global/workloadIdentityPools/github/attribute.repository/hanwol525/rollcaller-app" \
+#        --role=roles/iam.workloadIdentityUser --project=personal-project-289714
+#    The WIF provider full name (set as GCP_WORKLOAD_IDENTITY_PROVIDER) is:
+#      projects/$(gcloud projects describe personal-project-289714 --format='value(projectNumber)')/locations/global/workloadIdentityPools/github/providers/github-hanwol525
 #        --role=roles/iam.workloadIdentityUser --project=personal-project-289714
 #    Set the WIF provider full name as GCP_WORKLOAD_IDENTITY_PROVIDER.
 #
@@ -107,7 +112,7 @@ name: Deploy RollCaller
 
 on:
   push:
-    branches: [main]
+    branches-ignore: [main]  # trigger on any branch EXCEPT main for now
     paths:
       - 'backend/**'
       - 'frontend/**'
@@ -183,6 +188,7 @@ jobs:
         with:
           context: backend
           file: backend/Dockerfile
+          platforms: linux/amd64
           push: true
           tags: |
             ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
@@ -367,6 +373,7 @@ jobs:
         with:
           context: frontend
           file: frontend/Dockerfile
+          platforms: linux/amd64
           push: true
           tags: |
             ${{ steps.femeta.outputs.image }}:${{ steps.femeta.outputs.tag }}
