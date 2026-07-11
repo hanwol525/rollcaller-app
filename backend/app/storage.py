@@ -99,14 +99,9 @@ class MinIOStorage(StorageBackend):
         return resp["Body"].read()
 
     def url(self, key: str) -> str:
-        # In prod, MinIO serves directly; presign a long-lived URL (7 days,
-        # the boto3 maximum). For public-read buckets, you can instead
-        # construct the URL manually: f"{self.endpoint}/{self.bucket}/{key}"
-        return self.s3.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": self.bucket, "Key": key},
-            ExpiresIn=604800,  # 7 days (boto3 requires a positive integer)
-        )
+        # Serve through the backend's /media/{key} endpoint so MinIO
+        # doesn't need to be exposed externally.
+        return f"/media/{key}"
 
     def delete(self, key: str) -> None:
         self.s3.delete_object(Bucket=self.bucket, Key=key)

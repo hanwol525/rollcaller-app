@@ -57,18 +57,16 @@ def health():
 
 @app.get("/media/{key}", tags=["media"])
 def serve_media(key: str):
-    """Serve an audio file from the filesystem in dev.
+    """Serve an audio file from storage (any backend).
 
-    In prod (MinIO backend), the client is given a presigned URL directly and
-    doesn't hit this endpoint.
+    In dev (filesystem) this reads from disk. In prod (MinIO) this proxies
+    from the MinIO sidecar. The URL returned by storage.url() is always
+    /media/{key} so the browser never needs to reach MinIO directly.
     """
-    if settings.storage_backend != "filesystem":
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Media endpoint not available in prod; use presigned URLs.",
-        )
     try:
         data = storage.load(key)
     except FileNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Storage error")
     return Response(content=data, media_type="audio/wav")

@@ -19,9 +19,11 @@
 #      gcloud sql users create rollcaller --instance=automation-db-v2 \
 #        --password='<strong-password>' --project=personal-project-289714
 #
-# 3. GCS bucket for audio blobs (native GCS, no HMAC keys needed):
-#      gcloud storage buckets create gs://rollcaller-media \
-#        --project=personal-project-289714 --location=us-central1
+# 3. MinIO credentials (in-cluster sidecar, not exposed externally):
+#      printf 'rollcaller-minio' | gcloud secrets create rollcaller-minio-user \
+#        --data-file=- --project=personal-project-289714
+#      openssl rand -hex 16 | gcloud secrets create rollcaller-minio-password \
+#        --data-file=- --project=personal-project-289714
 #
 # 4. Store secrets in GCP Secret Manager (the CI pipeline syncs these into K8s
 #    on each deploy — no manual kubectl create secret needed):
@@ -36,15 +38,12 @@
 #      openssl rand -hex 32 | gcloud secrets create rollcaller-session-secret \
 #        --data-file=- --project=personal-project-289714
 #
-# 5. Runtime Workload Identity (pod -> Cloud SQL + GCS):
+# 5. Runtime Workload Identity (pod -> Cloud SQL):
 #      gcloud iam service-accounts create rollcaller-runtime \
 #        --project=personal-project-289714
 #      gcloud projects add-iam-policy-binding personal-project-289714 \
 #        --member=serviceAccount:rollcaller-runtime@personal-project-289714.iam.gserviceaccount.com \
 #        --role=roles/cloudsql.client
-#      gcloud projects add-iam-policy-binding personal-project-289714 \
-#        --member=serviceAccount:rollcaller-runtime@personal-project-289714.iam.gserviceaccount.com \
-#        --role=roles/storage.objectAdmin
 #      # Bind the KSA (after applying service-account.yaml once):
 #      gcloud iam service-accounts add-iam-policy-binding \
 #        rollcaller-runtime@personal-project-289714.iam.gserviceaccount.com \
@@ -258,6 +257,15 @@ jobs:
             --from-literal=gemma_model="${GEMMA_MODEL}" \
             --from-literal=gemma_base_url="${GEMMA_BASE_URL}" \
             --from-literal=gemma_api_key="${GEMMA_API_KEY}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          # MinIO sidecar credentials (static — in-cluster, not exposed externally)
+          MINIO_USER="$(gcloud secrets versions access latest --secret=rollcaller-minio-user --project="${GCP_PROJECT}")"
+          MINIO_PASS="$(gcloud secrets versions access latest --secret=rollcaller-minio-password --project="${GCP_PROJECT}")"
+
+          kubectl create secret generic rollcaller-minio -n rollcall \
+            --from-literal=access_key="${MINIO_USER}" \
+            --from-literal=secret_key="${MINIO_PASS}" \
             --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Apply manifests

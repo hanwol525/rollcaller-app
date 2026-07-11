@@ -41,6 +41,12 @@ spec:
     spec:
       serviceAccountName: rollcaller
       terminationGracePeriodSeconds: 30
+      volumes:
+        # Persistent volume for MinIO — survives pod restarts so clips
+        # aren't lost on redeploys. GKE Autopilot auto-provisions the PVC.
+        - name: minio-data
+          persistentVolumeClaim:
+            claimName: rollcaller-minio
       containers:
         # --- RollCaller API (FastAPI, port 8000) ---
         - name: backend
@@ -56,12 +62,25 @@ spec:
                 secretKeyRef:
                   name: rollcaller-db
                   key: database_url
-            # Object storage: native GCS via Workload Identity (ADC).
-            # No HMAC keys — the pod's GSA has roles/storage.objectAdmin on the bucket.
+            # Object storage: in-cluster MinIO sidecar on localhost:9000.
             - name: STORAGE_BACKEND
-              value: "gcs"
-            - name: GCS_BUCKET
-              value: "rollcaller-media"
+              value: "minio"
+            - name: S3_ENDPOINT
+              value: "http://localhost:9000"
+            - name: S3_BUCKET
+              value: "rollcaller"
+            - name: S3_SECURE
+              value: "false"
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: rollcaller-minio
+                  key: access_key
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: rollcaller-minio
+                  key: secret_key
             # Seeded organizer + session signing secret.
             - name: ORGANIZER_USERNAME
               valueFrom:
@@ -150,6 +169,68 @@ spec:
               cpu: "100m"
           securityContext:
             runAsNonRoot: true
+
+        # --- MinIO sidecar (in-cluster S3-compatible storage) ---
+        # Audio blobs live here instead of GCS — localhost round-trips only,
+        # no per-upload/per-URL GCS API calls. PVC survives pod restarts.
+        - name: minio
+          image: minio/minio:latest
+          args: ["server", "/data", "--console-address", ":9001"]
+          ports:
+            - containerPort: 9000
+              name: s3
+            - containerPort: 9001
+              name: console
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: rollcaller-minio
+                  key: access_key
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: rollcaller-minio
+                  key: secret_key
+          volumeMounts:
+            - name: minio-data
+              mountPath: /data
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "50m"
+            limits:
+              memory: "512Mi"
+              cpu: "250m"
+          readinessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: 9000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: 9000
+            initialDelaySeconds: 15
+            periodSeconds: 30
+---
+# Persistent volume for MinIO audio blobs.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rollcaller-minio
+  namespace: rollcall
+  labels:
+    app.kubernetes.io/name: rollcaller
+    app.kubernetes.io/component: storage
+    app.kubernetes.io/part-of: rollcaller
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
 ---
 apiVersion: v1
 kind: Service
@@ -206,6 +287,13 @@ spec:
                 port:
                   number: 8000
           - path: /invite
+            pathType: Prefix
+            backend:
+              service:
+                name: rollcaller-backend
+                port:
+                  number: 8000
+          - path: /media
             pathType: Prefix
             backend:
               service:
