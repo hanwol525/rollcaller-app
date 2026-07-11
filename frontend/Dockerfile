@@ -6,8 +6,9 @@
 FROM node:20-slim AS builder
 WORKDIR /app
 
-COPY package.json package-lock.json ./
-RUN npm ci
+COPY package.json package-lock.json* ./
+# npm install (not ci) so the lock file regenerates with adapter-node
+RUN npm install
 
 COPY . .
 RUN npm run build

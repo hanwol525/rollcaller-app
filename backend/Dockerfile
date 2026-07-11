@@ -1,8 +1,9 @@
 # RollCaller API image.
 #
-# Python 3.13 + system ffmpeg (browser-audio transcode) + pip deps.
+# Python 3.12 + system ffmpeg (browser-audio transcode) + pip deps.
+# 3.12 (not 3.13) because kokoro==0.8.4 requires Python <3.13.
 # Serves app.main:app on port 8000 via uvicorn.
-FROM python:3.13-slim
+FROM python:3.12-slim
 
 # System packages: ffmpeg is the only addition (audio transcoding).
 # espeak-ng is needed by phonemizer for g2p fallback.
