@@ -13,6 +13,8 @@ RUN npm install --ignore-scripts
 
 COPY . .
 RUN npm run build
+# Debug: verify .output exists before the runtime stage copies it
+RUN ls -la /app/.output/ || (echo "NO .output DIR — checking what exists:" && ls -la /app/ && exit 1)
 
 FROM node:20-slim
 WORKDIR /app
