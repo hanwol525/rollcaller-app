@@ -13,16 +13,17 @@ RUN npm install --ignore-scripts
 
 COPY . .
 RUN npm run build
-# Debug: verify .output exists before the runtime stage copies it
-RUN ls -la /app/.output/ || (echo "NO .output DIR — checking what exists:" && ls -la /app/ && exit 1)
+# Debug: find where the adapter put the output
+RUN ls -la /app/build/ 2>/dev/null && ls -la /app/.output/ 2>/dev/null || true
+RUN find /app -maxdepth 3 -name "index.js" -path "*/server/*" 2>/dev/null || true
 
 FROM node:20-slim
 WORKDIR /app
 
-COPY --from=builder /app/.output ./.output
+COPY --from=builder /app/build/ ./build/
 
 EXPOSE 3000
 ENV NODE_ENV=production
 ENV PORT=3000
 
-CMD ["node", ".output/server/index.js"]
+CMD ["node", "build/server/index.js"]
