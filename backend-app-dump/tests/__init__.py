@@ -1,1 +1,0 @@
-"""RollCaller test suite package."""
