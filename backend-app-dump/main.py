@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import threading
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import Response
@@ -15,6 +16,7 @@ from sqlmodel import Session
 
 from app.auth import seed_organizer
 from app.db import engine, init_db
+from app.pronunciation.orchestrator import warm_all
 from app.routers import auth as auth_router
 from app.routers import ceremony as ceremony_router
 from app.routers import invite as invite_router
@@ -32,6 +34,10 @@ async def lifespan(app: FastAPI):
     # 2. Seed the single organizer
     with Session(engine) as db:
         seed_organizer(db)
+    # 3. Warm heavy ML models in a BACKGROUND thread so the app starts serving
+    #    immediately (container healthy in <60s); models finish loading shortly
+    #    after. Pronunciation requests before warm-up complete fall back / retry.
+    threading.Thread(target=warm_all, daemon=True).start()
     yield
     # --- Shutdown ---
     # (nothing to clean up synchronously)

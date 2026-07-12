@@ -65,9 +65,6 @@ def synthesize(text: str, ipa: str | None = None) -> bytes:
     Returns WAV bytes from the first attempt that yields audio. If none do,
     raises RuntimeError — never emits a silent tone.
     """
-    global _pipeline
-    if _pipeline is None:
-        warm()                     # lazy-load Kokoro on first use
     if _pipeline is None:
         raise RuntimeError(
             "Kokoro pipeline not loaded — cannot synthesize (check venv / model weights)."

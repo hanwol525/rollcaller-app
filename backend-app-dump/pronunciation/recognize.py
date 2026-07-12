@@ -28,9 +28,6 @@ def warm() -> None:
 
 def recognize(wav_bytes: bytes) -> str:
     """Recognize IPA from a WAV audio bytes blob."""
-    global _processor, _model
-    if _model is None:
-        warm()                     # lazy-load the recognizer on first use
     if _processor is not None and _model is not None:
         try:
             import numpy as np
