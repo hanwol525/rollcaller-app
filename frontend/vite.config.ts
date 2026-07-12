@@ -2,6 +2,8 @@ import adapter from '@sveltejs/adapter-auto';
 import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig } from 'vite';
 
+const backend = process.env.BACKEND_URL || 'http://localhost:8000';
+
 export default defineConfig({
 	plugins: [
 		sveltekit({
@@ -27,15 +29,15 @@ export default defineConfig({
 			// The client-side recorder page uses /invite and /media via
 			// fetch, which do collide — so we bypass those for non-fetch
 			// (page navigation) requests.
-			'/auth': 'http://localhost:8000',
+			'/auth': backend,
 			'/invite': {
-				target: 'http://localhost:8000',
+				target: backend,
 				bypass: (req) => {
 					// Only proxy fetch/API calls, not page navigations
 					if (req.headers.accept?.includes('text/html')) return false;
 				}
 			},
-			'/media': 'http://localhost:8000'
+			'/media': backend
 		}
 	}
 });
