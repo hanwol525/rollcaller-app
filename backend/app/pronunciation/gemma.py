@@ -178,12 +178,12 @@ def gemma_ipa(name: str) -> str | None:
         "model": model,
         "messages": messages,
         "temperature": 0,  # deterministic -- prep re-runs are stable
-        "max_tokens": 64,  # IPA for a name is short
+        "max_tokens": 256,  # IPA for a name is short
         "stream": False,
         # Gemma 4 thinking off. Non-Gemma OpenAI-compatible servers ignore
         # unknown fields, so this is safe to always include.
-        "thinking": "low",
-        # "reasoning_effort": "low",
+        # "thinking": "low",
+        # "reasoning_effort": "low" <-for glm-5.2
     }
     headers = {
         "Authorization": f"Bearer {api_key}",
