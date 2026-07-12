@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import threading
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import Response
@@ -33,8 +34,10 @@ async def lifespan(app: FastAPI):
     # 2. Seed the single organizer
     with Session(engine) as db:
         seed_organizer(db)
-    # 3. Warm heavy ML models (Kokoro, Allosaurus) once
-    warm_all()
+    # 3. Warm heavy ML models in a BACKGROUND thread so the app starts serving
+    #    immediately (container healthy in <60s); models finish loading shortly
+    #    after. Pronunciation requests before warm-up complete fall back / retry.
+    threading.Thread(target=warm_all, daemon=True).start()
     yield
     # --- Shutdown ---
     # (nothing to clean up synchronously)
