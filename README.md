@@ -55,7 +55,7 @@ In short: Gemma turns *"reads names phonetically"* into *"correctly pronounces n
 The whole app — frontend, API, and database — runs with a single command. You need **Docker** and, for the Gemma path, an OpenAI-compatible LLM key (e.g. OpenRouter or Fireworks).
 
 ```bash
-git clone <your-repo-url> && cd rollcaller
+git clone https://github.com/hanwol525/rollcaller-app && cd rollcaller-app
 cp .env.example .env          # then paste your key into GEMMA_API_KEY
 docker compose up
 ```
