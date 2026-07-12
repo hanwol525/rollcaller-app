@@ -16,6 +16,22 @@ Two paths converge on one consistent ceremony voice:
 Clips are rendered live at "Prep Clips" time and stored, then played in walk order during the ceremony. Nothing is pre-baked or hardcoded — every pronunciation is generated on demand.
 
 ---
+## Running on AMD
+
+RollCaller's grapheme-to-phoneme (g2p) pipeline runs on **AMD Instinct GPUs** via **Fireworks' serverless inference**. Because the g2p layer speaks the standard OpenAI-compatible `/chat/completions` API, the model and provider are swappable with a single `.env` change — the same pipeline runs **Gemma 4** (on OpenRouter) for the richest multilingual pronunciations, and **GLM-5.2 on Fireworks' AMD Instinct hardware** for the identical g2p task.
+
+To run pronunciation generation on AMD:
+
+    GEMMA_BASE_URL=https://api.fireworks.ai/inference/v1
+    GEMMA_MODEL=accounts/fireworks/models/glm-5p2
+    GEMMA_API_KEY=fw_...
+
+*(The `GEMMA_*` variables name the g2p provider generally — the pipeline is model-agnostic; any OpenAI-compatible model works.)*
+
+With that config, every **Prep Clips** render executes on AMD Instinct GPUs. The token usage below is a full roster rendered through the AMD-backed endpoint:
+
+![AMD Instinct inference via Fireworks — token usage for a rendered roster](docs/amd-fireworks-usage.png)
+---
 
 ## Powered by Gemma 4
 
