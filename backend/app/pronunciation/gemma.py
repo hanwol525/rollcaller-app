@@ -178,12 +178,12 @@ def gemma_ipa(name: str) -> str | None:
         "model": model,
         "messages": messages,
         "temperature": 0,  # deterministic -- prep re-runs are stable
-        "max_tokens": 512,  # IPA for a name is short
+        "max_tokens": 64,  # IPA for a name is short
         "stream": False,
         # Gemma 4 thinking off. Non-Gemma OpenAI-compatible servers ignore
         # unknown fields, so this is safe to always include.
-        # "thinking": "low",
-        "reasoning_effort": "low",
+        "thinking": "low",
+        # "reasoning_effort": "low",
     }
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -196,7 +196,7 @@ def gemma_ipa(name: str) -> str | None:
       return None
 
     try:
-        with httpx.Client(timeout=10.0) as client:
+        with httpx.Client(timeout=30.0) as client:
             resp = client.post(url, json=payload, headers=headers)
         if resp.status_code != 200:
             return None
