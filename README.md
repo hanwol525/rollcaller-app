@@ -30,7 +30,7 @@ To run pronunciation generation on AMD:
 
 With that config, every **Prep Clips** render executes on AMD Instinct GPUs. The token usage below is a full roster rendered through the AMD-backed endpoint:
 
-![AMD Instinct inference via Fireworks — token usage for a rendered roster](docs/amd-fireworks-usage.png)
+![AMD Instinct inference via Fireworks — token usage for a rendered roster](Fireworks-Compute.png)
 ---
 
 ## Powered by Gemma 4
