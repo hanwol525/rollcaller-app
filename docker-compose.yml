@@ -17,6 +17,8 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    env_file:
+      - .env
     environment:
       DATABASE_URL: postgresql+psycopg2://user:password@postgres:5432/appdb
       STORAGE_BACKEND: filesystem
@@ -24,9 +26,6 @@ services:
       ORGANIZER_USERNAME: ${ORGANIZER_USERNAME:-organizer}
       ORGANIZER_PASSWORD: ${ORGANIZER_PASSWORD:-changeme}
       SESSION_SECRET: ${SESSION_SECRET:-dev-secret-change-in-production}
-      GEMMA_BASE_URL: ${GEMMA_BASE_URL:-}
-      GEMMA_MODEL: ${GEMMA_MODEL:-}
-      GEMMA_API_KEY: ${GEMMA_API_KEY:-}
       # Cache model weights on a volume so they download once, not every boot.
       HF_HOME: /models
     volumes:
