@@ -5,8 +5,8 @@
     storage.url(key: str) -> str
     storage.delete(key: str) -> None
 
-Swap backends by changing `settings.storage_backend` in config.py ("filesystem"
-or "minio"). Only this file needs to change to introduce a new backend.
+Swap backends by changing `settings.storage_backend` in config.py ("filesystem",
+"minio", or "gcs"). Only this file needs to change to introduce a new backend.
 """
 from __future__ import annotations
 
@@ -99,20 +99,55 @@ class MinIOStorage(StorageBackend):
         return resp["Body"].read()
 
     def url(self, key: str) -> str:
-        # In prod, MinIO serves directly; presign a long-lived URL (7 days,
-        # the boto3 maximum). For public-read buckets, you can instead
-        # construct the URL manually: f"{self.endpoint}/{self.bucket}/{key}"
-        return self.s3.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": self.bucket, "Key": key},
-            ExpiresIn=604800,  # 7 days (boto3 requires a positive integer)
-        )
+        # Serve through the backend's /media/{key} endpoint so MinIO
+        # doesn't need to be exposed externally.
+        return f"/media/{key}"
 
     def delete(self, key: str) -> None:
         self.s3.delete_object(Bucket=self.bucket, Key=key)
 
 
+class GCSStorage(StorageBackend):
+    """Prod storage: Google Cloud Storage via Workload Identity (ADC).
+
+    No credentials in env — the google-cloud-storage client picks up
+    Application Default Credentials from the GKE metadata server
+    (Workload Identity) automatically. The pod's GSA needs
+    roles/storage.objectAdmin on the bucket.
+    """
+
+    def __init__(self, bucket: str):
+        from google.cloud import storage  # imported lazily
+
+        self.bucket_name = bucket
+        self.client = storage.Client()
+        self.bucket = self.client.bucket(bucket)
+
+    def save(self, data: bytes, ext: str = "wav") -> str:
+        key = f"{uuid.uuid4().hex}.{ext.lstrip('.')}"
+        blob = self.bucket.blob(key)
+        blob.upload_from_string(data, content_type=f"audio/{ext}")
+        return key
+
+    def load(self, key: str) -> bytes:
+        return self.bucket.blob(key).download_as_bytes()
+
+    def url(self, key: str) -> str:
+        from datetime import timedelta
+
+        blob = self.bucket.blob(key)
+        return blob.generate_signed_url(
+            expiration=timedelta(days=7),
+            method="GET",
+        )
+
+    def delete(self, key: str) -> None:
+        self.bucket.blob(key).delete()
+
+
 def _build_storage() -> StorageBackend:
+    if settings.storage_backend == "gcs":
+        return GCSStorage(bucket=settings.gcs_bucket)
     if settings.storage_backend == "minio":
         return MinIOStorage(
             endpoint=settings.s3_endpoint,

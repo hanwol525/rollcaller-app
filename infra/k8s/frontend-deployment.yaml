@@ -1,0 +1,85 @@
+# RollCaller frontend — Deployment + Service.
+#
+# SvelteKit SSR (adapter-node) on port 3000. The SSR server calls the
+# backend in-cluster at http://rollcaller-backend.rollcall.svc:8000 via
+# the BACKEND_URL env var. Browser-direct API calls (/auth, /invite) are
+# routed to the backend by the Ingress in backend-deployment.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rollcaller-frontend
+  namespace: rollcall
+  labels:
+    app.kubernetes.io/name: rollcaller
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: rollcaller
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rollcaller
+      app.kubernetes.io/component: frontend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rollcaller
+        app.kubernetes.io/component: frontend
+        app.kubernetes.io/part-of: rollcaller
+    spec:
+      terminationGracePeriodSeconds: 15
+      containers:
+        - name: frontend
+          image: REGISTRY/rollcaller-frontend:latest  # replaced by CI (git-SHA tag)
+          ports:
+            - containerPort: 3000
+              protocol: TCP
+              name: http
+          env:
+            - name: BACKEND_URL
+              value: "http://rollcaller-backend.rollcall.svc.cluster.local:8000"
+            - name: NODE_ENV
+              value: "production"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "250m"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rollcaller-frontend
+  namespace: rollcall
+  labels:
+    app.kubernetes.io/name: rollcaller
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: rollcaller
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: rollcaller
+    app.kubernetes.io/component: frontend
+  ports:
+    - port: 3000
+      targetPort: 3000
+      protocol: TCP
+      name: http

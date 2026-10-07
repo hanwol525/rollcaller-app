@@ -1,0 +1,399 @@
+# Deploy RollCaller backend to the shared GKE Autopilot cluster and ensure the
+# Cloud DNS A record for rollcall.jonathansilverstein.us.
+#
+# Pattern matches the Predictions deploy-dashboard workflow: keyless
+# Workload Identity Federation, Artifact Registry build+push, kubectl apply +
+# set image + rollout, pinned action SHAs.
+#
+# ----------------------------------------------------------------------------
+# ONE-TIME INFRA SETUP (do this once before the first run):
+#
+# 1. Artifact Registry repo (if not reused from another app):
+#      gcloud artifacts repositories create rollcaller \
+#        --repository-format=docker --location=us-central1 \
+#        --project=personal-project-289714
+#
+# 2. Cloud SQL DB on automation-db-v2 (tenant pattern):
+#      gcloud sql databases create rollcaller --instance=automation-db-v2 \
+#        --project=personal-project-289714
+#      gcloud sql users create rollcaller --instance=automation-db-v2 \
+#        --password='<strong-password>' --project=personal-project-289714
+#
+# 3. MinIO credentials (in-cluster sidecar, not exposed externally):
+#      printf 'rollcaller-minio' | gcloud secrets create rollcaller-minio-user \
+#        --data-file=- --project=personal-project-289714
+#      openssl rand -hex 16 | gcloud secrets create rollcaller-minio-password \
+#        --data-file=- --project=personal-project-289714
+#
+# 4. Store secrets in GCP Secret Manager (the CI pipeline syncs these into K8s
+#    on each deploy — no manual kubectl create secret needed):
+#      DB_PW='<the password from step 2>'
+#      printf "postgresql+psycopg2://rollcaller:${DB_PW}@localhost:5432/rollcaller" \
+#        | gcloud secrets create rollcaller-db-url --data-file=- \
+#        --project=personal-project-289714
+#      printf '<organizer-username>' | gcloud secrets create rollcaller-organizer-username \
+#        --data-file=- --project=personal-project-289714
+#      printf '<organizer-password>' | gcloud secrets create rollcaller-organizer-password \
+#        --data-file=- --project=personal-project-289714
+#      openssl rand -hex 32 | gcloud secrets create rollcaller-session-secret \
+#        --data-file=- --project=personal-project-289714
+#
+# 5. Runtime Workload Identity (pod -> Cloud SQL):
+#      gcloud iam service-accounts create rollcaller-runtime \
+#        --project=personal-project-289714
+#      gcloud projects add-iam-policy-binding personal-project-289714 \
+#        --member=serviceAccount:rollcaller-runtime@personal-project-289714.iam.gserviceaccount.com \
+#        --role=roles/cloudsql.client
+#      # Bind the KSA (after applying service-account.yaml once):
+#      gcloud iam service-accounts add-iam-policy-binding \
+#        rollcaller-runtime@personal-project-289714.iam.gserviceaccount.com \
+#        --member="serviceAccount:personal-project-289714.svc.id.goog[rollcall/rollcaller]" \
+#        --role=roles/iam.workloadIdentityUser --project=personal-project-289714
+#
+# 6. CI Workload Identity (GitHub Actions -> GCP). Create a CI SA and a WIF
+#    provider scoped to repo hanwol525/rollcaller-app (least privilege):
+#      gcloud iam service-accounts create rollcaller-ci --project=personal-project-289714
+#      gcloud projects add-iam-policy-binding personal-project-289714 \
+#        --member=serviceAccount:rollcaller-ci@personal-project-289714.iam.gserviceaccount.com \
+#        --role=roles/artifactregistry.writer
+#      gcloud projects add-iam-policy-binding personal-project-289714 \
+#        --member=serviceAccount:rollcaller-ci@personal-project-289714.iam.gserviceaccount.com \
+#        --role=roles/container.developer
+#      gcloud projects add-iam-policy-binding personal-project-289714 \
+#        --member=serviceAccount:rollcaller-ci@personal-project-289714.iam.gserviceaccount.com \
+#        --role=roles/dns.admin
+#      # CI needs to read Secret Manager to sync secrets into K8s:
+#      gcloud projects add-iam-policy-binding personal-project-289714 \
+#        --member=serviceAccount:rollcaller-ci@personal-project-289714.iam.gserviceaccount.com \
+#        --role=roles/secretmanager.secretAccessor
+#      # WIF pool (may already exist if another repo set it up — create is
+#      # idempotent with || true):
+#      gcloud iam workload-identity-pools create github --location=global \
+#        --project=personal-project-289714 || true
+#      # WIF provider (attribute.condition gates which repos can impersonate):
+#      gcloud iam workload-identity-pools providers create-oidc github-hanwol525 \
+#        --workload-identity-pool=github --location=global \
+#        --project=personal-project-289714 \
+#        --issuer-uri=https://token.actions.githubusercontent.com \
+#        --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository" \
+#        --attribute-condition="attribute.repository == 'hanwol525/rollcaller-app'"
+#      gcloud iam service-accounts add-iam-policy-binding \
+#        rollcaller-ci@personal-project-289714.iam.gserviceaccount.com \
+#        --member="principalSet://iam.googleapis.com/projects/$(gcloud projects describe personal-project-289714 --format='value(projectNumber)')/locations/global/workloadIdentityPools/github/attribute.repository/hanwol525/rollcaller-app" \
+#        --role=roles/iam.workloadIdentityUser --project=personal-project-289714
+#    Set the WIF provider full name as the GCP_WORKLOAD_IDENTITY_PROVIDER GitHub
+#    secret. It must be the FULL resource name with the project NUMBER (not ID):
+#      PROJ_NUM=$(gcloud projects describe personal-project-289714 --format='value(projectNumber)')
+#      echo "projects/${PROJ_NUM}/locations/global/workloadIdentityPools/github/providers/github-hanwol525"
+#    Verify the provider exists before setting the secret:
+#      gcloud iam workload-identity-pools providers describe github-hanwol525 \
+#        --workload-identity-pool=github --location=global --project=personal-project-289714
+#
+# 7. Apply namespace + service-account.yaml once (the CI pipeline syncs all
+#    K8s secrets from Secret Manager on each deploy — no manual secret creation):
+#      kubectl apply -f infra/k8s/namespace.yaml
+#      kubectl apply -f infra/k8s/service-account.yaml
+#
+# Required GitHub Secrets:
+#   GCP_WORKLOAD_IDENTITY_PROVIDER  — full WIF provider resource name (step 5)
+#   GCP_SERVICE_ACCOUNT_EMAIL       — rollcaller-ci@personal-project-289714.iam.gserviceaccount.com
+#
+# Required GitHub Variables:
+#   GCP_PROJECT_ID        — personal-project-289714
+#   GKE_CLUSTER_NAME      — cluster
+#   GCP_REGION            — us-central1
+#   ARTIFACT_REGISTRY_REPO — rollcaller (default below)
+#   DNS_ZONE_NAME         — personal-website (Cloud DNS zone for jonathansilverstein.us; defaulted below)
+# ----------------------------------------------------------------------------
+#
+# Frontend: SvelteKit SSR (adapter-node). The frontend SSR server calls the
+# backend in-cluster via BACKEND_URL env var. Browser-direct API calls
+# (/auth, /invite) route to the backend through the shared nginx ingress.
+
+name: Deploy RollCaller
+
+on:
+  push:
+    branches-ignore: [main]  # trigger on any branch EXCEPT main for now
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'infra/k8s/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-rollcaller-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+  GCP_SERVICE_ACCOUNT_EMAIL: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+  GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  GKE_CLUSTER_NAME: ${{ vars.GKE_CLUSTER_NAME }}
+  GCP_REGION: ${{ vars.GCP_REGION || 'us-central1' }}
+  ARTIFACT_REGISTRY_REPO: ${{ vars.ARTIFACT_REGISTRY_REPO || 'rollcaller' }}
+  # Cloud DNS managed zone for jonathansilverstein.us is `personal-website`
+  # (verify: gcloud dns managed-zones list --project=personal-project-289714).
+  DNS_ZONE_NAME: ${{ vars.DNS_ZONE_NAME || 'personal-website' }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Build and push the backend Docker image
+  # ---------------------------------------------------------------------------
+  build-backend:
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@955352c3b43196640b567e4646256d2fbb4aa1c7 # v1
+        with:
+          token_format: access_token
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT_EMAIL }}
+
+      - name: Login to Artifact Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.GCP_REGION }}-docker.pkg.dev
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - name: Set image metadata
+        id: meta
+        run: |
+          IMAGE="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REGISTRY_REPO}/rollcaller-backend"
+          TAG="${GITHUB_SHA::7}"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        with:
+          context: backend
+          file: backend/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+            ${{ steps.meta.outputs.image }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------------------
+  # 2. Deploy to GKE + ensure the Cloud DNS A record
+  # ---------------------------------------------------------------------------
+  deploy:
+    needs: [build-backend, build-frontend]
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@955352c3b43196640b567e4646256d2fbb4aa1c7 # v1
+        with:
+          token_format: access_token
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT_EMAIL }}
+
+      - name: Configure GKE credentials
+        uses: google-github-actions/get-gke-credentials@35ab0d2b2d48792c19f09325413bd185c8d44394 # v1
+        with:
+          cluster_name: ${{ env.GKE_CLUSTER_NAME }}
+          location: ${{ env.GCP_REGION }}
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Sync secrets from Secret Manager
+        # Fetch each secret value from GCP Secret Manager and create/update the
+        # K8s secret. This runs on every deploy so Secret Manager is the single
+        # source of truth — no manual kubectl create secret needed.
+        env:
+          GCP_PROJECT: ${{ env.GCP_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+
+          DB_URL="$(gcloud secrets versions access latest --secret=rollcaller-db-url --project="${GCP_PROJECT}")"
+          ORG_USER="$(gcloud secrets versions access latest --secret=rollcaller-organizer-username --project="${GCP_PROJECT}")"
+          ORG_PW="$(gcloud secrets versions access latest --secret=rollcaller-organizer-password --project="${GCP_PROJECT}")"
+          SESSION_SECRET="$(gcloud secrets versions access latest --secret=rollcaller-session-secret --project="${GCP_PROJECT}")"
+          GEMMA_MODEL="$(gcloud secrets versions access latest --secret=rollcaller-model --project="${GCP_PROJECT}")"
+          GEMMA_BASE_URL="$(gcloud secrets versions access latest --secret=rollcaller-gemma-base --project="${GCP_PROJECT}")"
+          GEMMA_API_KEY="$(gcloud secrets versions access latest --secret=GEMMA_API_KEY --project="${GCP_PROJECT}")"
+
+          kubectl create secret generic rollcaller-db -n rollcall \
+            --from-literal=database_url="${DB_URL}" \
+            --from-literal=connection_name="personal-project-289714:us-central1:automation-db-v2" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl create secret generic rollcaller-auth -n rollcall \
+            --from-literal=organizer_username="${ORG_USER}" \
+            --from-literal=organizer_password="${ORG_PW}" \
+            --from-literal=session_secret="${SESSION_SECRET}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl create secret generic rollcaller-gemma -n rollcall \
+            --from-literal=gemma_model="${GEMMA_MODEL}" \
+            --from-literal=gemma_base_url="${GEMMA_BASE_URL}" \
+            --from-literal=gemma_api_key="${GEMMA_API_KEY}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          # MinIO sidecar credentials (static — in-cluster, not exposed externally)
+          MINIO_USER="$(gcloud secrets versions access latest --secret=rollcaller-minio-user --project="${GCP_PROJECT}")"
+          MINIO_PASS="$(gcloud secrets versions access latest --secret=rollcaller-minio-password --project="${GCP_PROJECT}")"
+
+          kubectl create secret generic rollcaller-minio -n rollcall \
+            --from-literal=access_key="${MINIO_USER}" \
+            --from-literal=secret_key="${MINIO_PASS}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Apply manifests
+        run: |
+          kubectl apply -f infra/k8s/namespace.yaml
+          kubectl apply -f infra/k8s/service-account.yaml
+          kubectl apply -f infra/k8s/backend-deployment.yaml
+          kubectl apply -f infra/k8s/frontend-deployment.yaml
+
+      - name: Update backend image tag
+        env:
+          IMAGE: ${{ needs.build-backend.outputs.image }}
+          TAG: ${{ needs.build-backend.outputs.tag }}
+        run: |
+          kubectl set image deployment/rollcaller-backend \
+            backend="${IMAGE}:${TAG}" \
+            -n rollcall
+
+      - name: Update frontend image tag
+        env:
+          IMAGE: ${{ needs.build-frontend.outputs.image }}
+          TAG: ${{ needs.build-frontend.outputs.tag }}
+        run: |
+          kubectl set image deployment/rollcaller-frontend \
+            frontend="${IMAGE}:${TAG}" \
+            -n rollcall
+
+      - name: Wait for backend rollout
+        # startupProbe grants 360s for first-run ML model downloads; allow more.
+        run: |
+          kubectl rollout status deployment/rollcaller-backend \
+            -n rollcall --timeout=900s
+
+      - name: Wait for frontend rollout
+        run: |
+          kubectl rollout status deployment/rollcaller-frontend \
+            -n rollcall --timeout=120s
+
+      - name: Ensure Cloud DNS A record for rollcall.jonathansilverstein.us
+        env:
+          HOST: rollcall.jonathansilverstein.us
+        run: |
+          set -euo pipefail
+          # Resolve the shared ingress-nginx LoadBalancer IP (falls back to the
+          # known static IP if the controller isn't labeled as expected).
+          INGRESS_IP="$(kubectl get svc -n ingress-nginx \
+            -l app.kubernetes.io/name=ingress-nginx \
+            -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+          INGRESS_IP="${INGRESS_IP:-34.44.19.142}"
+          echo "Pointing ${HOST} -> ${INGRESS_IP}"
+          if gcloud dns record-sets describe "${HOST}." \
+               --zone="${DNS_ZONE_NAME}" --type=A --project="${GCP_PROJECT_ID}" >/dev/null 2>&1; then
+            echo "Record exists — updating"
+            gcloud dns record-sets update "${HOST}." \
+              --zone="${DNS_ZONE_NAME}" --type=A --ttl=300 \
+              --rrdatas="${INGRESS_IP}" --project="${GCP_PROJECT_ID}"
+          else
+            echo "Record absent — creating"
+            gcloud dns record-sets create "${HOST}." \
+              --zone="${DNS_ZONE_NAME}" --type=A --ttl=300 \
+              --rrdatas="${INGRESS_IP}" --project="${GCP_PROJECT_ID}"
+          fi
+
+      - name: Wait for TLS certificate
+        # letsencrypt-prod uses HTTP-01, so issuance starts once the DNS A
+        # record resolves to the ingress. Give it a few minutes.
+        run: |
+          kubectl wait certificate rollcaller-tls -n rollcall \
+            --for=condition=Ready --timeout=300s || \
+          echo "::warning::Certificate not Ready within 300s — check cert-manager + DNS propagation"
+
+      - name: Verify
+        run: |
+          echo "Backend health (best-effort; may lag DNS propagation):"
+          curl -fsS -o /dev/null -w "%{http_code}\n" "https://rollcall.jonathansilverstein.us/health" || \
+            echo "not reachable yet from the runner — check from a browser once DNS propagates"
+
+  # ---------------------------------------------------------------------------
+  # 3. Build and push the frontend Docker image
+  # ---------------------------------------------------------------------------
+  build-frontend:
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      image: ${{ steps.femeta.outputs.image }}
+      tag: ${{ steps.femeta.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@955352c3b43196640b567e4646256d2fbb4aa1c7 # v1
+        with:
+          token_format: access_token
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT_EMAIL }}
+
+      - name: Login to Artifact Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.GCP_REGION }}-docker.pkg.dev
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - name: Set image metadata
+        id: femeta
+        run: |
+          IMAGE="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REGISTRY_REPO}/rollcaller-frontend"
+          TAG="${GITHUB_SHA::7}"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        with:
+          context: frontend
+          file: frontend/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.femeta.outputs.image }}:${{ steps.femeta.outputs.tag }}
+            ${{ steps.femeta.outputs.image }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

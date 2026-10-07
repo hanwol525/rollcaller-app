@@ -38,6 +38,7 @@ fastapi==0.115.6
 filelock==3.29.0
 frozenlist==1.8.0
 fsspec==2026.4.0
+google-cloud-storage==3.1.0
 greenlet==3.5.3
 h11==0.16.0
 hf-xet==1.5.1

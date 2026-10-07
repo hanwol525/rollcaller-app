@@ -1,5 +1,8 @@
-# RollCaller API image. Python 3.12 (some deps have no 3.13 wheels) +
-# system ffmpeg/espeak-ng. Serves app.main:app on 8000 via uvicorn.
+# RollCaller API image.
+#
+# Python 3.12 + system ffmpeg (browser-audio transcode) + espeak-ng + pip deps.
+# 3.12 (not 3.13) because kokoro==0.8.4 requires Python <3.13.
+# Serves app.main:app on port 8000 via uvicorn.
 FROM python:3.12-slim
 
 RUN apt-get update \

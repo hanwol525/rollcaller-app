@@ -1,14 +1,26 @@
-# RollCaller frontend — runs the Vite dev server (the app's known-good config),
-# with the backend URL injected via BACKEND_URL. Serves on 5173.
-FROM node:22-slim
-
+# RollCaller frontend — SvelteKit SSR via adapter-node.
+#
+# Multi-stage: build with Node, then copy only .output into a slim runtime.
+# The server reads BACKEND_URL from env (set in the k8s Deployment to the
+# in-cluster Service URL).
+FROM node:20-slim AS builder
 WORKDIR /app
 
-COPY package.json package-lock.json ./
-RUN npm install
+COPY package.json package-lock.json* ./
+# --ignore-scripts skips the prepare script (svelte-kit sync) which needs
+# svelte.config.js — not copied yet. Sync runs during `npm run build` instead.
+RUN npm install --ignore-scripts
 
 COPY . .
+RUN npm run build
 
-EXPOSE 5173
-# --host binds to 0.0.0.0 so the container is reachable from the host.
-CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]
+FROM node:20-slim
+WORKDIR /app
+
+COPY --from=builder /app/build/ ./build/
+
+EXPOSE 3000
+ENV NODE_ENV=production
+ENV PORT=3000
+
+CMD ["node", "build/index.js"]

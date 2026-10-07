@@ -14,8 +14,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -217,3 +217,8 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 backend-app-dump/
+
+# RollCaller — real K8s secret manifests (the template secrets.example.yaml
+# is committed; populated copies must never be committed).
+infra/k8s/secrets.yaml
+infra/k8s/*-secret.yaml

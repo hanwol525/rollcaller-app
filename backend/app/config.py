@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./rollcaller.db"
 
     # --- Storage ---
-    # "filesystem" for dev, "minio" for prod (swappable in this one file)
+    # "filesystem" for dev, "minio" for S3-compatible, "gcs" for native GCS (Workload Identity)
     storage_backend: str = "filesystem"
     storage_fs_root: str = "./blobstore"
     # MinIO / S3 settings (used only when storage_backend == "minio")
@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     s3_secret_key: str | None = None
     s3_bucket: str = "rollcaller"
     s3_secure: bool = False
+    # GCS settings (used only when storage_backend == "gcs")
+    # No credentials needed — ADC via Workload Identity handles auth.
+    gcs_bucket: str = "rollcaller-media"
 
     # --- Auth ---
     # Single seeded organizer
