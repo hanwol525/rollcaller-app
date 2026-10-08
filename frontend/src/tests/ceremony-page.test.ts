@@ -76,29 +76,23 @@ describe('⭐ "no phonetics" invariant — ceremony player', () => {
 		expect(container.textContent).not.toContain(SAMPLE_IPA);
 	});
 
-	test('IPA does not leak on the finished screen', () => {
-		const ceremony = makeCeremony();
-		const { container } = renderCeremony(ceremony);
-
-		// Even on the complete screen, no IPA should appear
-		expect(container.textContent).not.toContain(SAMPLE_IPA);
-		expect(container.textContent).not.toContain('/ˈbɒb/');
-	});
+	// TODO(ceremony-player brief): real coverage of the finished screen.
+	// The deleted 'IPA does not leak on the finished screen' never rendered it:
+	// the component starts at currentIndex 0 and isFinished is
+	// `currentIndex >= roster.length`, so with the 2-item fixture the
+	// {:else if isFinished} branch never mounts. Its two assertions were
+	// byte-identical to the test above. Reaching that screen needs the suite to
+	// drive Next to the end, which no test here does.
 });
 
 // ─ Regression: persistent audio element ───────────────────────────────────── //
 
 describe('regression: play works on every item via the persistent audio element', () => {
-	test('the <audio> element is always in the DOM (not conditionally mounted)', () => {
-		const ceremony = makeCeremony();
-		const { container } = renderCeremony(ceremony);
-
-		// The audio element must exist regardless of which item is current.
-		// The bug was conditional mounting — {#if clip_url} <audio> {/if} —
-		// which meant audioEl was null when navigating to a no-clip item.
-		const audio = container.querySelector('audio');
-		expect(audio).toBeInTheDocument();
-	});
+	// Deleted: 'the <audio> element is always in the DOM (not conditionally
+	// mounted)'. It rendered the default fixture, whose first item HAS a clip,
+	// so it could not detect the regression it was named for. Mutation probe:
+	// wrapping the <audio> in {#if currentItem?.clip_url} left it passing while
+	// the test below failed. That test covers the regression completely.
 
 	test('audio element is in the DOM even when the first item has no clip', () => {
 		const ceremony = makeCeremony({
@@ -173,19 +167,11 @@ describe('regression: auto-advance skips a participant with no clip instead of f
 		expect(container.textContent).toContain('no clip');
 	});
 
-	test('a null-clip item shows navigation buttons (prev/next)', () => {
-		const ceremony = makeCeremony({
-			roster: [
-				{ position: 1, name: 'Has Clip', clip_url: 'https://example.com/a.mp3', ipa_text: null, ipa_source: null },
-				{ position: 2, name: 'No Clip', clip_url: null, ipa_text: SAMPLE_IPA, ipa_source: 'g2p' },
-				{ position: 3, name: 'Has Clip 2', clip_url: 'https://example.com/b.mp3', ipa_text: null, ipa_source: null }
-			]
-		});
-		// Start on the no-clip item (index 1) — but we can't control currentIndex
-		// from props. Instead, verify the queue is rendered and clickable.
-		const { container } = renderCeremony(ceremony);
-
-		// The queue should list all items
-		expect(container.textContent).toContain('No Clip');
-	});
+	// TODO(ceremony-player brief): real coverage of prev/next on a no-clip item.
+	// The deleted 'a null-clip item shows navigation buttons (prev/next)'
+	// asserted only `toContain('No Clip')` — which is the participant NAME from
+	// its own fixture, not a button. Mutation probe: deleting both .nav-btn
+	// pairs from the component left it passing. Real coverage needs
+	// getByRole('button', { name: /prev|next/i }) and a click that advances
+	// currentIndex, which requires driving the component rather than props.
 });

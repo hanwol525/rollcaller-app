@@ -132,18 +132,13 @@ class TestStorageFilesystem:
         with pytest.raises(FileNotFoundError):
             s.load(key)
 
-    def test_path_traversal_prevention(self):
-        """A key with path separators should be sanitized to basename only."""
-        from app.storage import FilesystemStorage
-        fs = FilesystemStorage(root="./blobstore_test_traversal", media_base_url="/media")
-        key = fs.save(b"data", ext="wav")
-        # Try to load with a traversal attempt
-        # The _path method strips to basename, so this is safe
-        loaded = fs.load(key)
-        assert loaded == b"data"
-        # Cleanup
-        import shutil
-        shutil.rmtree("./blobstore_test_traversal", ignore_errors=True)
+    # TODO(security brief): real path-traversal coverage for FilesystemStorage.
+    # The deleted test_path_traversal_prevention never constructed a traversal
+    # string — it saved a clean UUID key and loaded it straight back, so it was
+    # a duplicate of test_save_and_load_roundtrip wearing a security name.
+    # Mutation probe: deleting the `safe = Path(key).name` sanitizer at
+    # storage.py:45 left it passing. A real test calls
+    # fs.load("../../etc/passwd") and asserts the escape fails.
 
 
 class TestPronunciationFallbacks:
