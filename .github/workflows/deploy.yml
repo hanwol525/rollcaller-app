@@ -113,13 +113,9 @@
 name: Deploy RollCaller
 
 on:
-  push:
-    branches-ignore: [main]  # trigger on any branch EXCEPT main for now
-    paths:
-      - 'backend/**'
-      - 'frontend/**'
-      - 'infra/k8s/**'
-      - '.github/workflows/deploy.yml'
+  # Push triggers removed. This workflow deploys to a collaborator's GKE cluster
+  # and does not work (see DEPLOY-NOTES.md); it previously fired on every push to
+  # any branch except main. Manual dispatch only until a deploy target is chosen.
   workflow_dispatch:
 
 concurrency:
