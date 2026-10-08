@@ -10,8 +10,10 @@
 import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
-	testDir: './e2e/tests',
-	globalSetup: './e2e/global-setup.ts',
+	// Resolved relative to THIS file's directory (frontend/e2e/), not the
+	// package root — './e2e/tests' pointed at frontend/e2e/e2e/tests.
+	testDir: './tests',
+	globalSetup: './global-setup.ts',
 	fullyParallel: false, // E2E shares backend state — run sequentially
 	forbidOnly: !!process.env.CI,
 	retries: process.env.CI ? 1 : 0,
