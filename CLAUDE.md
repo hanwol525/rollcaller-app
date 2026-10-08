@@ -66,8 +66,8 @@ The venv lives at **`backend/app/venv`** — not `backend/.venv`. Run backend co
 npm run dev          # Vite dev server on 5173 — the only working front end (see below)
 npm run build        # adapter-node -> build/index.js
 npm run check        # svelte-kit sync && svelte-check
-npm test             # vitest     — has never executed; see Gotchas
-npm run test:e2e     # playwright — has never executed; see Gotchas
+npm test             # vitest     — 11 tests, green
+npm run test:e2e     # playwright — needs a live backend on :8000 (see Gotchas)
 ```
 
 ### ⚠️ The only working local setup is `npm run dev` + `uvicorn`, run separately
@@ -84,8 +84,13 @@ npm run test:e2e     # playwright — has never executed; see Gotchas
 
 Treat compose as broken-but-unfixed rather than as the quickstart. Fixing it is deferred work.
 
-There is **no CI, no linter and no formatter** — no `.github/`, no ruff/black/eslint/prettier
-config anywhere. `svelte-check` is the only type gate and nothing runs it automatically.
+CI is `.github/workflows/ci.yml` — tests only, no deploy and no secrets. Push and PR run the
+backend gate (`pytest -m "not integration"`) and the frontend gate (`npm ci && npm run check &&
+npm test`). A third job, `backend-integration`, installs the full ML stack and runs everything
+including the `@integration` tests; it fires only on `workflow_dispatch` or the weekly schedule.
+
+There is still **no linter and no formatter** — no ruff/black/eslint/prettier config anywhere.
+`svelte-check` is the only style-adjacent gate, and CI now runs it.
 
 ## Architecture
 
@@ -161,15 +166,17 @@ former GKE setup did this at the nginx ingress. A bare adapter-node deploy with 
 ## Gotchas that cost time
 
 - **The local venv is deliberately slim** (Intel Mac — `torch`/`kokoro` have no macOS x86_64
-  wheels past certain versions). Baseline is **113 passed / 11 failed / 4 skipped**. All 11
-  failures are `No module named 'kokoro'`; the 4 skips are missing `ffmpeg`. That is the expected
-  state — treat any *other* number as a regression.
-- **The suite cannot reach green in any environment.** 11 tests need `tts.synthesize()` to
-  succeed while `test_models.py` needs it to raise, through the same module global.
-- **The frontend test suites have never executed, on any branch.** `vitest.config.ts` points at
-  `src/lib/test/setup.ts`, which exists in no commit anywhere; Playwright's `testDir`/`globalSetup`
-  resolve relative to `frontend/e2e/`, so they point at `frontend/e2e/e2e/`. Both die before
-  running a test.
+  wheels past certain versions). Expected local state is **112 passed, 15 skipped, 0 failed**
+  (127 collected): 11 `@integration` tests skip without `kokoro`, 4 transcode tests skip without
+  `ffmpeg`. Treat any *failure* as a regression; the skips are the design.
+- **Tests needing the real ML stack are marked `@pytest.mark.integration`** plus a `skipif` on
+  `kokoro` being importable. The marker lets CI deselect by intent; the skipif keeps any
+  kokoro-less machine from erroring. They run in the `backend-integration` CI job only.
+- **Don't let a test depend on a dependency being absent.** The two
+  `*_raises_when_pipeline_unavailable` tests used to pass only because `kokoro` wasn't installed,
+  and failed the moment it was. They now force the condition themselves — nulling
+  `tts._pipeline` is not enough, because `synthesize()` lazily re-warms at `tts.py:70`, so
+  `tts.warm` is neutered too.
 - **`requirements.txt` is a `pip freeze` at `backend/app/requirements.txt`** — note the path, and
   note it pins both `phonemizer` and `phonemizer-fork` (same import package, non-deterministic
   winner) plus dead deps (`allosaurus`, `pyjwt`) and `pytest` into the production image.

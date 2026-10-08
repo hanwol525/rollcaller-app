@@ -1,0 +1,109 @@
+# RollCaller CI — tests only. No deploy, no secrets, no cloud provider.
+#
+# The repo previously had one workflow that deployed to a live Kubernetes
+# cluster on every push to any branch except main, with no test step at all.
+# It was removed in Brief 01. This replaces it with the inverse: a gate that
+# only runs tests and can never deploy anything. See DEPLOY-NOTES.md.
+#
+# Python is pinned to 3.12 because kokoro==0.8.4 requires <3.13.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Mondays 06:00 UTC — exercises the integration job that the push gate skips.
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: backend (push gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # test_transcode.py is the strongest suite in the repo — it synthesizes
+      # real fixtures and asserts decoded sample counts rather than RIFF
+      # headers. Without ffmpeg its 4 tests skip and browser-audio
+      # normalization, a real product surface, goes untested.
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/app/requirements.txt
+
+      # The full pinned set, not a curated subset — a second dependency list
+      # would drift from the 139-line freeze. Test selection is by marker.
+      - name: Install dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r app/requirements.txt \
+            --extra-index-url https://download.pytorch.org/whl/cpu
+
+      - name: Run tests (excluding integration)
+        working-directory: backend
+        run: python -m pytest app/tests -q -m "not integration"
+
+  frontend:
+    name: frontend (push gate)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+
+  backend-integration:
+    name: backend (integration — full ML stack)
+    # Not on push: these load Kokoro and synthesize audio, which is slow and
+    # downloads model weights. This is the only place the @integration tests
+    # run, and the only place the two *_raises_when_pipeline_unavailable tests
+    # are exercised against kokoro being PRESENT — the state that used to break
+    # them before they were made hermetic.
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/app/requirements.txt
+
+      - name: Install dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r app/requirements.txt \
+            --extra-index-url https://download.pytorch.org/whl/cpu
+
+      - name: Run the full suite
+        working-directory: backend
+        run: python -m pytest app/tests -q
