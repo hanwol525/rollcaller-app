@@ -1,6 +1,6 @@
 import type { Cookies } from '@sveltejs/kit';
 
-// In prod (k8s) this is http://rollcaller-backend.rollcall.svc.cluster.local:8000.
+// Set BACKEND_URL to wherever the API is reachable from the SSR process.
 // In dev it defaults to the local backend.
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000';
 const SESSION_COOKIE = 'session';

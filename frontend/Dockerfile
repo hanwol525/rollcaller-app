@@ -1,8 +1,8 @@
 # RollCaller frontend — SvelteKit SSR via adapter-node.
 #
-# Multi-stage: build with Node, then copy only .output into a slim runtime.
-# The server reads BACKEND_URL from env (set in the k8s Deployment to the
-# in-cluster Service URL).
+# Multi-stage: build with Node, then copy only build/ into a slim runtime.
+# The server reads BACKEND_URL from env; set it to wherever the API is reachable
+# from inside the container.
 FROM node:20-slim AS builder
 WORKDIR /app
 

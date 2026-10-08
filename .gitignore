@@ -218,7 +218,9 @@ __marimo__/
 .streamlit/secrets.toml
 backend-app-dump/
 
-# RollCaller — real K8s secret manifests (the template secrets.example.yaml
-# is committed; populated copies must never be committed).
-infra/k8s/secrets.yaml
-infra/k8s/*-secret.yaml
+# RollCaller — local audit output. Leading slash anchors these to the repo root
+# so they cannot swallow a same-named path nested anywhere else (see AUDIT.md
+# §3.5: an unanchored `lib/` from the Python template silently excluded
+# frontend/src/lib/ and left the frontend unbuildable).
+/AUDIT.md
+/model-swap-check/

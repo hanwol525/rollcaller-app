@@ -22,10 +22,10 @@ def _build_engine():
             connect_args=connect_args,
             poolclass=poolclass,
         )
-    # Postgres: configure pool for the Cloud SQL Auth Proxy, which drops idle
+    # Postgres: managed providers and connection proxies commonly drop idle
     # connections after ~10 min. pool_pre_ping checks liveness before reuse
     # (prevents 500 on stale connections); pool_recycle caps connection age
-    # below the proxy's idle timeout.
+    # below a typical idle timeout.
     return create_engine(
         url,
         echo=False,
@@ -34,7 +34,7 @@ def _build_engine():
         pool_size=5,
         max_overflow=10,
         pool_pre_ping=True,
-        pool_recycle=300,  # 5 min — well under the proxy's ~10 min idle timeout
+        pool_recycle=300,  # 5 min — well under a typical ~10 min idle timeout
     )
 
 

@@ -78,8 +78,6 @@ docker compose up
 
 Open **http://localhost:5173** and sign in (`organizer` / `changeme` by default).
 
-> **Two compose files — use the root one.** Run the **root** `docker-compose.yml` (the command above) to launch the whole app. The separate `backend/docker-compose.yml` only brings up Postgres + MinIO for backend-only local development; you don't need it for a normal run.
-
 > **First launch downloads the speech models** (Kokoro + wav2vec2, ~2 GB) in the background — the app comes up in seconds, but the *first* "Prep Clips" or recording waits a minute or two for the models to finish loading. They're cached on a volume after that, so later runs are instant.
 
 Without a `GEMMA_API_KEY`, the app still runs — hard names just use the eSpeak fallback instead of Gemma.
@@ -212,10 +210,9 @@ backend/
     routers/                # auth, spaces, participants, ceremony, invite
     requirements.txt        # Python deps  ← note: under app/
   Dockerfile
-  docker-compose.yml        # Postgres + MinIO for backend-only dev (NOT the app runner)
 frontend/                   # SvelteKit + TypeScript
   Dockerfile
-docker-compose.yml          # ← the one to run: full app (frontend + backend + Postgres)
+docker-compose.yml          # the app runner: frontend + backend + Postgres
 .env.example                # root env template for the Docker run
 ```
 
