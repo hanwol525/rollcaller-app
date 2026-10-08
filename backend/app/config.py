@@ -1,5 +1,7 @@
 """Application configuration via environment variables."""
 from pathlib import Path
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,8 +17,11 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./rollcaller.db"
 
     # --- Storage ---
-    # "filesystem" for dev, "minio" for S3-compatible
-    storage_backend: str = "filesystem"
+    # "filesystem" for dev, "minio" for S3-compatible. Constrained to the backends
+    # _build_storage() actually implements: an unrecognized value must fail loudly at
+    # startup, not fall through to the filesystem and silently write participant
+    # audio somewhere nobody is looking.
+    storage_backend: Literal["filesystem", "minio"] = "filesystem"
     storage_fs_root: str = "./blobstore"
     # MinIO / S3 settings (used only when storage_backend == "minio")
     s3_endpoint: str | None = None

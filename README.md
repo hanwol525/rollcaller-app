@@ -80,6 +80,8 @@ Open **http://localhost:5173** and sign in (`organizer` / `changeme` by default)
 
 > **First launch downloads the speech models** (Kokoro + wav2vec2, ~2 GB) in the background — the app comes up in seconds, but the *first* "Prep Clips" or recording waits a minute or two for the models to finish loading. They're cached on a volume after that, so later runs are instant.
 
+> **There is no deploy target yet.** [`DEPLOY-NOTES.md`](DEPLOY-NOTES.md) records the constraints any future deploy has to satisfy — the Python 3.12 pin, the `ORIGIN` setting adapter-node needs, the render timeout, storage persistence — plus the known gaps in the local Docker run (the frontend container listens on 3000 while compose maps 5173, and no compose file starts MinIO). Read it before wiring up hosting.
+
 Without a `GEMMA_API_KEY`, the app still runs — hard names just use the eSpeak fallback instead of Gemma.
 
 ### Configuring Gemma for the Docker run
@@ -214,6 +216,7 @@ frontend/                   # SvelteKit + TypeScript
   Dockerfile
 docker-compose.yml          # the app runner: frontend + backend + Postgres
 .env.example                # root env template for the Docker run
+DEPLOY-NOTES.md             # deploy constraints + known gaps; no target chosen yet
 ```
 
 ## Notes
