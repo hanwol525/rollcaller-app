@@ -161,11 +161,19 @@ class TestPronunciationFallbacks:
         assert len(result) > 0
         assert isinstance(result, str)
 
-    def test_synthesize_raises_when_pipeline_unavailable(self):
-        """Without Kokoro loaded, synthesize must raise — no silent tone fallback."""
-        from app.pronunciation.tts import synthesize
+    def test_synthesize_raises_when_pipeline_unavailable(self, monkeypatch):
+        """With no Kokoro pipeline, synthesize must raise — no silent tone fallback.
+
+        Forces the unavailable condition rather than assuming it. Nulling
+        _pipeline alone is not enough: synthesize() lazily re-warms at
+        tts.py:70, so warm() is neutered too. Without this the test asserts
+        only that kokoro happens to be uninstalled, and fails the moment it is.
+        """
+        from app.pronunciation import tts
+        monkeypatch.setattr(tts, "_pipeline", None)
+        monkeypatch.setattr(tts, "warm", lambda: None)
         with pytest.raises(RuntimeError):
-            synthesize("Alice", ipa="/ælɪs/")
+            tts.synthesize("Alice", ipa="/ælɪs/")
 
     def test_orchestrator_g2p_name(self):
         from app.pronunciation.orchestrator import g2p_name
@@ -173,11 +181,17 @@ class TestPronunciationFallbacks:
         assert isinstance(result, str)
         assert len(result) > 0
 
-    def test_orchestrator_render_clip_raises_when_pipeline_unavailable(self):
-        """Without Kokoro loaded, render_clip must raise — no silent tone fallback."""
-        from app.pronunciation.orchestrator import render_clip
+    def test_orchestrator_render_clip_raises_when_pipeline_unavailable(self, monkeypatch):
+        """Same contract one layer up: render_clip must not swallow the failure.
+
+        orchestrator.py:46 resolves tts.synthesize as a module attribute at
+        call time, so neutering tts here is visible through render_clip.
+        """
+        from app.pronunciation import orchestrator, tts
+        monkeypatch.setattr(tts, "_pipeline", None)
+        monkeypatch.setattr(tts, "warm", lambda: None)
         with pytest.raises(RuntimeError):
-            render_clip("Bob", ipa_text="/bɒb/")
+            orchestrator.render_clip("Bob", ipa_text="/bɒb/")
 
     def test_orchestrator_recognize_recording(self):
         from app.pronunciation.orchestrator import recognize_recording

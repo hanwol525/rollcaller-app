@@ -7,6 +7,10 @@ This file covers the ACCEPTANCE CRITERIA:
 """
 from __future__ import annotations
 
+import importlib.util
+
+import pytest
+
 import os
 from pathlib import Path
 
@@ -161,6 +165,11 @@ class TestUploadRecording:
 
 
 class TestPreviewIPA:
+    @pytest.mark.integration
+    @pytest.mark.skipif(
+        importlib.util.find_spec("kokoro") is None,
+        reason="kokoro not installed",
+    )
     def test_preview_returns_wav(self, client, make_participant):
         space, p = make_participant()
         resp = client.post(
@@ -171,6 +180,11 @@ class TestPreviewIPA:
         assert resp.headers["content-type"] == "audio/wav"
         assert len(resp.content) > 0
 
+    @pytest.mark.integration
+    @pytest.mark.skipif(
+        importlib.util.find_spec("kokoro") is None,
+        reason="kokoro not installed",
+    )
     def test_preview_does_not_store(self, client, make_participant):
         """CRITICAL: preview must NOT write anything to storage."""
         space, p = make_participant()
@@ -196,6 +210,11 @@ class TestPreviewIPA:
 
 
 class TestConfirmIPA:
+    @pytest.mark.integration
+    @pytest.mark.skipif(
+        importlib.util.find_spec("kokoro") is None,
+        reason="kokoro not installed",
+    )
     def test_confirm_sets_confirmed_and_clip(self, client, make_participant):
         space, p = make_participant()
 
@@ -222,6 +241,11 @@ class TestConfirmIPA:
         clip_path = Path(settings.storage_fs_root) / participant["clip_key"]
         assert clip_path.exists()
 
+    @pytest.mark.integration
+    @pytest.mark.skipif(
+        importlib.util.find_spec("kokoro") is None,
+        reason="kokoro not installed",
+    )
     def test_confirm_without_edit_keeps_prior_source(
         self, client, make_participant, wav_bytes
     ):
@@ -253,6 +277,11 @@ class TestConfirmIPA:
         participant = [x for x in roster if x["id"] == p["id"]][0]
         assert participant["ipa_source"] == "recognized"
 
+    @pytest.mark.integration
+    @pytest.mark.skipif(
+        importlib.util.find_spec("kokoro") is None,
+        reason="kokoro not installed",
+    )
     def test_confirm_with_edit_sets_manual(self, client, make_participant, wav_bytes):
         """A human edit to the IPA sets ipa_source='manual'."""
         space, p = make_participant()

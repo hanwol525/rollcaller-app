@@ -1,12 +1,21 @@
 """Tests for /spaces/{id}/render and /spaces/{id}/ceremony endpoints."""
 from __future__ import annotations
 
+import importlib.util
+
+import pytest
+
 from pathlib import Path
 
 from app.config import settings
 
 
 class TestRenderCeremony:
+    @pytest.mark.integration
+    @pytest.mark.skipif(
+        importlib.util.find_spec("kokoro") is None,
+        reason="kokoro not installed",
+    )
     def test_render_creates_clip_for_every_participant(self, authed_client, make_space):
         """Every participant gets a clip even if they submitted nothing."""
         space = make_space()
@@ -31,6 +40,11 @@ class TestRenderCeremony:
             clip_path = Path(settings.storage_fs_root) / p["clip_key"]
             assert clip_path.exists()
 
+    @pytest.mark.integration
+    @pytest.mark.skipif(
+        importlib.util.find_spec("kokoro") is None,
+        reason="kokoro not installed",
+    )
     def test_render_uses_confirmed_ipa_when_available(
         self, authed_client, make_space, wav_bytes
     ):
@@ -60,6 +74,11 @@ class TestRenderCeremony:
         assert p["ipa_source"] == "recognized"
         assert p["clip_key"] is not None
 
+    @pytest.mark.integration
+    @pytest.mark.skipif(
+        importlib.util.find_spec("kokoro") is None,
+        reason="kokoro not installed",
+    )
     def test_render_g2p_overrides_recording_if_unconfirmed(
         self, authed_client, make_space
     ):
@@ -93,6 +112,11 @@ class TestRenderCeremony:
         assert resp.status_code == 200
         assert resp.json()["rendered"] == 0
 
+    @pytest.mark.integration
+    @pytest.mark.skipif(
+        importlib.util.find_spec("kokoro") is None,
+        reason="kokoro not installed",
+    )
     def test_rerender_replaces_old_clip(self, authed_client, make_space):
         """Re-rendering should delete the old clip and create a new one."""
         space = make_space()
@@ -146,6 +170,11 @@ class TestGetCeremony:
         assert resp.status_code == 200
         assert resp.json()["roster"][0]["clip_url"] is None
 
+    @pytest.mark.integration
+    @pytest.mark.skipif(
+        importlib.util.find_spec("kokoro") is None,
+        reason="kokoro not installed",
+    )
     def test_ceremony_clip_urls_populated_after_render(self, authed_client, make_space):
         space = make_space()
         authed_client.post(

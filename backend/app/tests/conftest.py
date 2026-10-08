@@ -79,12 +79,20 @@ def client(db_engine):
         seed_organizer(s)
 
     with TestClient(app) as c:
-        # Reset pronunciation module state AFTER lifespan startup so tests
-        # use fallbacks, not the real ML models that warm_all() loaded.
+        # Reset pronunciation module state so each test starts from the
+        # unwarmed condition. Note the lifespan does NOT call warm_all() —
+        # main.py only runs init_db() and seed_organizer() — so nothing has
+        # loaded these; the reset guards against leakage between tests that
+        # trigger the lazy warm (tts.py:70, recognize.py:32).
+        #
+        # These are the real module globals. Two of them were previously
+        # misnamed (`recognize._recognizer`, `tts._tts`), which silently
+        # created new unused attributes and reset nothing.
         from app.pronunciation import g2p, recognize, tts
         g2p._backend = None
-        recognize._recognizer = None
-        tts._tts = None
+        recognize._processor = None
+        recognize._model = None
+        tts._pipeline = None
         yield c
 
     app.dependency_overrides.clear()

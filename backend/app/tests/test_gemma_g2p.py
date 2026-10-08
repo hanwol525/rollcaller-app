@@ -8,6 +8,10 @@ tests modified).
 """
 from __future__ import annotations
 
+import importlib.util
+
+import pytest
+
 from app.models import IPASource
 from app.pronunciation.gemma import _sanitize_ipa, gemma_ipa
 from app.pronunciation.g2p import g2p, espeak_ipa
@@ -142,6 +146,11 @@ class TestG2pFallsBackWhenGemmaUnavailable:
         assert espeak.startswith("/") and espeak.endswith("/")
         assert result.startswith("/") and result.endswith("/")
 
+    @pytest.mark.integration
+    @pytest.mark.skipif(
+        importlib.util.find_spec("kokoro") is None,
+        reason="kokoro not installed",
+    )
     def test_render_keeps_g2p_source_when_gemma_unavailable(
         self, authed_client, make_space
     ):
