@@ -18,7 +18,7 @@ live cluster on every push to any non-`main` branch (filtered to `backend/**`, `
 
 **Choosing a deploy target is an open decision.** Nothing here recommends one.
 
-This file exists because deleting that stack would otherwise throw away five things that were
+This file exists because deleting that stack would otherwise throw away six things that were
 expensive to learn. They are constraints on *any* future deploy, not GKE trivia.
 
 ---
@@ -132,6 +132,54 @@ sidecar-attaching a node-local volume to a rolling Deployment.
 
 **Pin the storage image.** `minio/minio:latest` (`backend-deployment.yaml:177`) was the only
 unpinned image in an otherwise pinned manifest — and it held all participant audio.
+
+### 6. Any deploy needs a reverse proxy routing `/auth`, `/invite` and `/media` to the backend
+
+The browser-side client calls the backend on **relative paths**, there are **zero `+server.ts`
+routes**, and the backend has **no CORS middleware**. Nothing in the app itself routes those
+paths — something in front of it must.
+
+Verified on `main`:
+
+- `frontend/src/lib/api.ts` fetches `/invite/${token}` (`:28`), `/invite/${token}/recording`
+  (`:36`), `/invite/${token}/ipa/preview` (`:42`), `/invite/${token}/ipa/confirm` (`:56`) and
+  `/auth/logout` (`:66`) — all relative.
+- `frontend/vite.config.ts:12-28` proxies `/auth`, `/invite` and `/media` to the backend. That is
+  what makes dev work.
+- `git ls-files '*+server.ts'` → none. `git grep -E 'CORSMiddleware|add_middleware' -- backend/app`
+  → none.
+
+**In dev**, Vite's proxy does the routing. **In the former GKE deploy**, the nginx ingress did —
+part of why that stack worked. **A bare `adapter-node` deploy with nothing in front 404s on every
+clip and every invite call.**
+
+What actually breaks, which is worse than "the participant surface":
+
+| Surface | Without a proxy |
+|---|---|
+| Participant `/record/{token}` | 🔴 entirely dead — cannot load, upload, preview or confirm |
+| Organizer **ceremony player** | 🔴 **no audio.** `clip_url` is `/media/{key}` (`storage.py:104`, emitted at `ceremony.py:131`) and the browser fetches it via `audioEl.src` (`ceremony/+page.svelte:25,77`). Every clip 404s |
+| Organizer **Sign Out** | 🔴 404s — `logout()` is browser-side (`spaces/+layout.svelte:2`) |
+| Organizer data loading | 🟢 fine — every `+page.server.ts` goes through `$lib/server`, which calls `BACKEND_URL` directly |
+
+So the organizer screens *render* — rosters, spaces, participants all load — while the app's
+entire audio output is silent. It looks far healthier than it is.
+
+⚠️ **There is no `/invite` page route** — an earlier version of this note said there was, and that
+`vite.config.ts`'s `Accept: text/html` bypass existed to resolve a collision. It doesn't.
+`frontend/src/routes/` contains only `record/` and `spaces/`; the recorder is `/record/[token]`,
+and `GET /invite/{token}` with `Accept: text/html` returns SvelteKit's own 404. The bypass at
+`vite.config.ts:21-25` guards against a collision that has never existed, and the comment above
+it claiming one is wrong too — the claim was inherited from that comment rather than checked.
+
+So `/invite/*` can be proxied unconditionally. The bypass is harmless but misleading; whoever
+touches that config next should delete it rather than reproduce it in a new proxy.
+
+Minimum requirement for any target: a proxy layer (nginx, Caddy, a platform router, a CDN rule)
+forwarding `/auth/*`, `/invite/*` and `/media/*` to the backend, everything else
+to the Node server. A platform giving you only one port per service needs either two services
+plus a router, or `+server.ts` proxy routes added to the frontend — the latter a code change, not
+a config one.
 
 ---
 

@@ -5,6 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.models import Participant, ParticipantStatus, IPASource
+from app.tests._deps import KOKORO_AVAILABLE
 
 
 class TestParticipantIPAVariant:
@@ -132,18 +133,13 @@ class TestStorageFilesystem:
         with pytest.raises(FileNotFoundError):
             s.load(key)
 
-    def test_path_traversal_prevention(self):
-        """A key with path separators should be sanitized to basename only."""
-        from app.storage import FilesystemStorage
-        fs = FilesystemStorage(root="./blobstore_test_traversal", media_base_url="/media")
-        key = fs.save(b"data", ext="wav")
-        # Try to load with a traversal attempt
-        # The _path method strips to basename, so this is safe
-        loaded = fs.load(key)
-        assert loaded == b"data"
-        # Cleanup
-        import shutil
-        shutil.rmtree("./blobstore_test_traversal", ignore_errors=True)
+    # TODO(security brief): real path-traversal coverage for FilesystemStorage.
+    # The deleted test_path_traversal_prevention never constructed a traversal
+    # string — it saved a clean UUID key and loaded it straight back, so it was
+    # a duplicate of test_save_and_load_roundtrip wearing a security name.
+    # Mutation probe: deleting the `safe = Path(key).name` sanitizer at
+    # storage.py:45 left it passing. A real test calls
+    # fs.load("../../etc/passwd") and asserts the escape fails.
 
 
 class TestPronunciationFallbacks:
@@ -161,11 +157,19 @@ class TestPronunciationFallbacks:
         assert len(result) > 0
         assert isinstance(result, str)
 
-    def test_synthesize_raises_when_pipeline_unavailable(self):
-        """Without Kokoro loaded, synthesize must raise — no silent tone fallback."""
-        from app.pronunciation.tts import synthesize
-        with pytest.raises(RuntimeError):
-            synthesize("Alice", ipa="/ælɪs/")
+    def test_synthesize_raises_when_pipeline_unavailable(self, monkeypatch):
+        """With no Kokoro pipeline, synthesize must raise — no silent tone fallback.
+
+        Forces the unavailable condition rather than assuming it. Nulling
+        _pipeline alone is not enough: synthesize() lazily re-warms at
+        tts.py:70, so warm() is neutered too. Without this the test asserts
+        only that kokoro happens to be uninstalled, and fails the moment it is.
+        """
+        from app.pronunciation import tts
+        monkeypatch.setattr(tts, "_pipeline", None)
+        monkeypatch.setattr(tts, "warm", lambda: None)
+        with pytest.raises(RuntimeError, match="pipeline not loaded"):
+            tts.synthesize("Alice", ipa="/ælɪs/")
 
     def test_orchestrator_g2p_name(self):
         from app.pronunciation.orchestrator import g2p_name
@@ -173,11 +177,19 @@ class TestPronunciationFallbacks:
         assert isinstance(result, str)
         assert len(result) > 0
 
-    def test_orchestrator_render_clip_raises_when_pipeline_unavailable(self):
-        """Without Kokoro loaded, render_clip must raise — no silent tone fallback."""
-        from app.pronunciation.orchestrator import render_clip
-        with pytest.raises(RuntimeError):
-            render_clip("Bob", ipa_text="/bɒb/")
+    def test_orchestrator_render_clip_raises_when_pipeline_unavailable(self, monkeypatch):
+        """Same contract one layer up: render_clip must not swallow the failure.
+
+        What makes the patch visible is that synthesize() reads its own module
+        globals at call time (tts.py:68-71) — not how orchestrator resolves
+        synthesize. Patching tts._pipeline/tts.warm would be seen even through a
+        from-import binding.
+        """
+        from app.pronunciation import orchestrator, tts
+        monkeypatch.setattr(tts, "_pipeline", None)
+        monkeypatch.setattr(tts, "warm", lambda: None)
+        with pytest.raises(RuntimeError, match="pipeline not loaded"):
+            orchestrator.render_clip("Bob", ipa_text="/bɒb/")
 
     def test_orchestrator_recognize_recording(self):
         from app.pronunciation.orchestrator import recognize_recording
@@ -185,8 +197,15 @@ class TestPronunciationFallbacks:
         assert isinstance(result, str)
         assert len(result) > 0
 
+    @pytest.mark.integration
+    @pytest.mark.skipif(not KOKORO_AVAILABLE, reason="kokoro not installed")
     def test_warm_all_does_not_raise(self):
-        """warm_all should not raise even if ML deps aren't installed."""
+        """warm_all should not raise even if ML deps aren't installed.
+
+        Marked integration: warm_all() constructs a real KPipeline and a real
+        wav2vec2 model, downloading weights. Unmarked it was the one test that
+        made the push gate pull ~1.6 GB despite deselecting the other 11.
+        """
         from app.pronunciation.orchestrator import warm_all
         warm_all()  # should complete without error
 

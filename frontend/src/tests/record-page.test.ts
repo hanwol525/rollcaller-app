@@ -90,7 +90,11 @@ describe('⭐ "no phonetics" invariant — record-flow review screen', () => {
 	});
 
 	test('landing screen never displays IPA text', async () => {
-		const self = makeSelf({ status: 'invited', ipa_text: null });
+		// ipa_text is deliberately POPULATED. It was `null`, which made the
+		// assertion below unfalsifiable — the string it looks for was never in
+		// the data. Mutation probe: leaking {self.ipa_text} onto the landing
+		// screen left the old version passing and fails this one.
+		const self = makeSelf({ status: 'invited', ipa_text: SAMPLE_IPA });
 		vi.mocked(getSelf).mockResolvedValue(self);
 
 		const { container } = renderRecordPage();
