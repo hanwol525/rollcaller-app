@@ -21,7 +21,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # Keyed on the BRANCH, not github.ref. A commit on a branch with an open
+  # same-repo PR fires both `push` (ref refs/heads/x) and `pull_request`
+  # (ref refs/pull/N/merge); keying on github.ref gives them different groups
+  # and both run the full gate. head_ref||ref_name is "x" for both, so the
+  # second cancels the first.
+  group: ci-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -45,7 +50,10 @@ jobs:
           cache-dependency-path: backend/app/requirements.txt
 
       # The full pinned set, not a curated subset — a second dependency list
-      # would drift from the 139-line freeze. Test selection is by marker.
+      # would drift from the 138-line freeze. Test selection is by marker, so
+      # kokoro and torch are INSTALLED here but never loaded: every test that
+      # would construct a pipeline carries @integration and is deselected
+      # below. Nothing in this job downloads model weights.
       - name: Install dependencies
         working-directory: backend
         run: |
@@ -79,10 +87,14 @@ jobs:
   backend-integration:
     name: backend (integration — full ML stack)
     # Not on push: these load Kokoro and synthesize audio, which is slow and
-    # downloads model weights. This is the only place the @integration tests
-    # run, and the only place the two *_raises_when_pipeline_unavailable tests
-    # are exercised against kokoro being PRESENT — the state that used to break
-    # them before they were made hermetic.
+    # downloads ~1.6 GB of model weights. This is the only place the
+    # @integration tests execute.
+    #
+    # Note what this job does NOT uniquely provide: kokoro is installed in the
+    # push gate too (same requirements.txt), so the two
+    # *_raises_when_pipeline_unavailable tests meet a present kokoro on every
+    # push. That is fine — they force _pipeline=None and neuter warm, so they
+    # assert the contract rather than the environment.
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     steps:

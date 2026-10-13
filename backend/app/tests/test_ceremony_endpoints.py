@@ -1,19 +1,18 @@
 """Tests for /spaces/{id}/render and /spaces/{id}/ceremony endpoints."""
 from __future__ import annotations
 
-import importlib.util
+from pathlib import Path
 
 import pytest
 
-from pathlib import Path
-
 from app.config import settings
+from app.tests._deps import KOKORO_AVAILABLE
 
 
 class TestRenderCeremony:
     @pytest.mark.integration
     @pytest.mark.skipif(
-        importlib.util.find_spec("kokoro") is None,
+        not KOKORO_AVAILABLE,
         reason="kokoro not installed",
     )
     def test_render_creates_clip_for_every_participant(self, authed_client, make_space):
@@ -42,7 +41,7 @@ class TestRenderCeremony:
 
     @pytest.mark.integration
     @pytest.mark.skipif(
-        importlib.util.find_spec("kokoro") is None,
+        not KOKORO_AVAILABLE,
         reason="kokoro not installed",
     )
     def test_render_uses_confirmed_ipa_when_available(
@@ -76,7 +75,7 @@ class TestRenderCeremony:
 
     @pytest.mark.integration
     @pytest.mark.skipif(
-        importlib.util.find_spec("kokoro") is None,
+        not KOKORO_AVAILABLE,
         reason="kokoro not installed",
     )
     def test_render_g2p_overrides_recording_if_unconfirmed(
@@ -114,7 +113,7 @@ class TestRenderCeremony:
 
     @pytest.mark.integration
     @pytest.mark.skipif(
-        importlib.util.find_spec("kokoro") is None,
+        not KOKORO_AVAILABLE,
         reason="kokoro not installed",
     )
     def test_rerender_replaces_old_clip(self, authed_client, make_space):
@@ -172,7 +171,7 @@ class TestGetCeremony:
 
     @pytest.mark.integration
     @pytest.mark.skipif(
-        importlib.util.find_spec("kokoro") is None,
+        not KOKORO_AVAILABLE,
         reason="kokoro not installed",
     )
     def test_ceremony_clip_urls_populated_after_render(self, authed_client, make_space):

@@ -165,13 +165,18 @@ What actually breaks, which is worse than "the participant surface":
 So the organizer screens *render* — rosters, spaces, participants all load — while the app's
 entire audio output is silent. It looks far healthier than it is.
 
-Note the `/invite` subtlety: it is both an API prefix and a page route. `vite.config.ts` handles
-the collision with a `bypass` that passes `Accept: text/html` requests through to SvelteKit. Any
-replacement proxy needs the same discrimination, or navigating to `/invite/{token}` gets proxied
-to the backend instead of rendering the recorder.
+⚠️ **There is no `/invite` page route** — an earlier version of this note said there was, and that
+`vite.config.ts`'s `Accept: text/html` bypass existed to resolve a collision. It doesn't.
+`frontend/src/routes/` contains only `record/` and `spaces/`; the recorder is `/record/[token]`,
+and `GET /invite/{token}` with `Accept: text/html` returns SvelteKit's own 404. The bypass at
+`vite.config.ts:21-25` guards against a collision that has never existed, and the comment above
+it claiming one is wrong too — the claim was inherited from that comment rather than checked.
+
+So `/invite/*` can be proxied unconditionally. The bypass is harmless but misleading; whoever
+touches that config next should delete it rather than reproduce it in a new proxy.
 
 Minimum requirement for any target: a proxy layer (nginx, Caddy, a platform router, a CDN rule)
-forwarding `/auth/*`, `/invite/*` (non-HTML only) and `/media/*` to the backend, everything else
+forwarding `/auth/*`, `/invite/*` and `/media/*` to the backend, everything else
 to the Node server. A platform giving you only one port per service needs either two services
 plus a router, or `+server.ts` proxy routes added to the frontend — the latter a code change, not
 a config one.

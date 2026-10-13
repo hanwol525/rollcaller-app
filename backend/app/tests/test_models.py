@@ -5,6 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.models import Participant, ParticipantStatus, IPASource
+from app.tests._deps import KOKORO_AVAILABLE
 
 
 class TestParticipantIPAVariant:
@@ -167,7 +168,7 @@ class TestPronunciationFallbacks:
         from app.pronunciation import tts
         monkeypatch.setattr(tts, "_pipeline", None)
         monkeypatch.setattr(tts, "warm", lambda: None)
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError, match="pipeline not loaded"):
             tts.synthesize("Alice", ipa="/ælɪs/")
 
     def test_orchestrator_g2p_name(self):
@@ -179,13 +180,15 @@ class TestPronunciationFallbacks:
     def test_orchestrator_render_clip_raises_when_pipeline_unavailable(self, monkeypatch):
         """Same contract one layer up: render_clip must not swallow the failure.
 
-        orchestrator.py:46 resolves tts.synthesize as a module attribute at
-        call time, so neutering tts here is visible through render_clip.
+        What makes the patch visible is that synthesize() reads its own module
+        globals at call time (tts.py:68-71) — not how orchestrator resolves
+        synthesize. Patching tts._pipeline/tts.warm would be seen even through a
+        from-import binding.
         """
         from app.pronunciation import orchestrator, tts
         monkeypatch.setattr(tts, "_pipeline", None)
         monkeypatch.setattr(tts, "warm", lambda: None)
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError, match="pipeline not loaded"):
             orchestrator.render_clip("Bob", ipa_text="/bɒb/")
 
     def test_orchestrator_recognize_recording(self):
@@ -194,8 +197,15 @@ class TestPronunciationFallbacks:
         assert isinstance(result, str)
         assert len(result) > 0
 
+    @pytest.mark.integration
+    @pytest.mark.skipif(not KOKORO_AVAILABLE, reason="kokoro not installed")
     def test_warm_all_does_not_raise(self):
-        """warm_all should not raise even if ML deps aren't installed."""
+        """warm_all should not raise even if ML deps aren't installed.
+
+        Marked integration: warm_all() constructs a real KPipeline and a real
+        wav2vec2 model, downloading weights. Unmarked it was the one test that
+        made the push gate pull ~1.6 GB despite deselecting the other 11.
+        """
         from app.pronunciation.orchestrator import warm_all
         warm_all()  # should complete without error
 

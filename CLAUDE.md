@@ -57,7 +57,7 @@ The venv lives at **`backend/app/venv`** — not `backend/.venv`. Run backend co
 ```bash
 # Backend (from backend/)
 ./app/venv/bin/python -m pytest app/tests -q                    # full suite
-./app/venv/bin/python -m pytest app/tests -q -k traversal       # single test, by keyword
+./app/venv/bin/python -m pytest app/tests -q -k login          # subset, by keyword
 ./app/venv/bin/python -m pytest \
   app/tests/test_auth_endpoints.py::TestLogin::test_login_success -q   # by node id
 ./app/venv/bin/uvicorn app.main:app --reload --port 8000
@@ -66,7 +66,7 @@ The venv lives at **`backend/app/venv`** — not `backend/.venv`. Run backend co
 npm run dev          # Vite dev server on 5173 — the only working front end (see below)
 npm run build        # adapter-node -> build/index.js
 npm run check        # svelte-kit sync && svelte-check
-npm test             # vitest     — 11 tests, green
+npm test             # vitest     — 12 tests, green
 npm run test:e2e     # playwright — needs a live backend on :8000 (see Gotchas)
 ```
 
@@ -166,8 +166,8 @@ former GKE setup did this at the nginx ingress. A bare adapter-node deploy with 
 ## Gotchas that cost time
 
 - **The local venv is deliberately slim** (Intel Mac — `torch`/`kokoro` have no macOS x86_64
-  wheels past certain versions). Expected local state is **112 passed, 15 skipped, 0 failed**
-  (127 collected): 11 `@integration` tests skip without `kokoro`, 4 transcode tests skip without
+  wheels past certain versions). Expected local state is **111 passed, 16 skipped, 0 failed**
+  (127 collected): 12 `@integration` tests skip without `kokoro`, 4 transcode tests skip without
   `ffmpeg`. Treat any *failure* as a regression; the skips are the design.
 - **Tests needing the real ML stack are marked `@pytest.mark.integration`** plus a `skipif` on
   `kokoro` being importable. The marker lets CI deselect by intent; the skipif keeps any
@@ -191,8 +191,11 @@ former GKE setup did this at the nginx ingress. A bare adapter-node deploy with 
   `AUDIT.md` §2.1 — the landmines are three `monkeypatch.setattr` *string* targets in
   `test_gemma_g2p.py` that fail only at runtime.
 - **Recovery from the archived branches is path-scoped only.** `origin/ci-cd-gke-deploy` and the
-  `archive/*` tags preserve the pre-consolidation state, but that branch is 26 commits behind and
-  still pins `allosaurus==1.0.2` — restore specific paths from it, never wholesale.
+  `archive/*` tags preserve the pre-consolidation state, but that branch never received the
+  Allosaurus -> wav2vec2 migration and still pins `allosaurus==1.0.2` — restore specific paths
+  from it, never wholesale. (Check the distance with
+  `git rev-list --count archive/ci-cd-gke-deploy..main` rather than trusting a number here; it
+  grows with every commit on main.)
 
 ## README caveats
 

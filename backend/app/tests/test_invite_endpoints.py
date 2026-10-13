@@ -7,15 +7,14 @@ This file covers the ACCEPTANCE CRITERIA:
 """
 from __future__ import annotations
 
-import importlib.util
-
-import pytest
-
 import os
 from pathlib import Path
 
+import pytest
+
 from app.config import settings
 from app.storage import storage
+from app.tests._deps import KOKORO_AVAILABLE
 
 
 class TestGetSelf:
@@ -167,7 +166,7 @@ class TestUploadRecording:
 class TestPreviewIPA:
     @pytest.mark.integration
     @pytest.mark.skipif(
-        importlib.util.find_spec("kokoro") is None,
+        not KOKORO_AVAILABLE,
         reason="kokoro not installed",
     )
     def test_preview_returns_wav(self, client, make_participant):
@@ -182,7 +181,7 @@ class TestPreviewIPA:
 
     @pytest.mark.integration
     @pytest.mark.skipif(
-        importlib.util.find_spec("kokoro") is None,
+        not KOKORO_AVAILABLE,
         reason="kokoro not installed",
     )
     def test_preview_does_not_store(self, client, make_participant):
@@ -212,7 +211,7 @@ class TestPreviewIPA:
 class TestConfirmIPA:
     @pytest.mark.integration
     @pytest.mark.skipif(
-        importlib.util.find_spec("kokoro") is None,
+        not KOKORO_AVAILABLE,
         reason="kokoro not installed",
     )
     def test_confirm_sets_confirmed_and_clip(self, client, make_participant):
@@ -243,7 +242,7 @@ class TestConfirmIPA:
 
     @pytest.mark.integration
     @pytest.mark.skipif(
-        importlib.util.find_spec("kokoro") is None,
+        not KOKORO_AVAILABLE,
         reason="kokoro not installed",
     )
     def test_confirm_without_edit_keeps_prior_source(
@@ -279,7 +278,7 @@ class TestConfirmIPA:
 
     @pytest.mark.integration
     @pytest.mark.skipif(
-        importlib.util.find_spec("kokoro") is None,
+        not KOKORO_AVAILABLE,
         reason="kokoro not installed",
     )
     def test_confirm_with_edit_sets_manual(self, client, make_participant, wav_bytes):
