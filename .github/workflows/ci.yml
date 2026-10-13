@@ -26,7 +26,7 @@ concurrency:
   # (ref refs/pull/N/merge); keying on github.ref gives them different groups
   # and both run the full gate. head_ref||ref_name is "x" for both, so the
   # second cancels the first.
-  group: ci-${{ github.head_ref || github.ref_name }}
+  group: ci-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
