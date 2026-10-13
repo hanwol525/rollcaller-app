@@ -81,18 +81,28 @@ describe('⭐ "no phonetics" invariant — ceremony player', () => {
 	// the component starts at currentIndex 0 and isFinished is
 	// `currentIndex >= roster.length`, so with the 2-item fixture the
 	// {:else if isFinished} branch never mounts. Its two assertions were
-	// byte-identical to the test above. Reaching that screen needs the suite to
-	// drive Next to the end, which no test here does.
+	// byte-identical to the test above.
+	//
+	// It IS reachable from props, contrary to what this TODO first claimed:
+	// an empty roster makes `0 >= 0` true, and the not-prepped gate is guarded
+	// by `roster.length > 0` so it does not intercept. A real test renders
+	// makeCeremony({ roster: [] }) and asserts the completion copy, then a
+	// populated roster driven to the end via Next.
 });
 
 // ─ Regression: persistent audio element ───────────────────────────────────── //
 
 describe('regression: play works on every item via the persistent audio element', () => {
-	// Deleted: 'the <audio> element is always in the DOM (not conditionally
-	// mounted)'. It rendered the default fixture, whose first item HAS a clip,
-	// so it could not detect the regression it was named for. Mutation probe:
-	// wrapping the <audio> in {#if currentItem?.clip_url} left it passing while
-	// the test below failed. That test covers the regression completely.
+	// Both halves of the regression are needed. The pair is complementary, not
+	// redundant: this one pins the clip-BEARING path, the one below pins the
+	// null-clip path. Deleting either leaves a conditional-mount regression
+	// detectable in only one direction.
+	test('audio element is in the DOM when the current item HAS a clip', () => {
+		const ceremony = makeCeremony();
+		const { container } = renderCeremony(ceremony);
+
+		expect(container.querySelector('audio')).toBeInTheDocument();
+	});
 
 	test('audio element is in the DOM even when the first item has no clip', () => {
 		const ceremony = makeCeremony({
@@ -149,12 +159,16 @@ describe('not-prepped gate', () => {
 
 // ─ Regression: no-clip item shows "No clip available" ─────────────────────── //
 
-describe('regression: auto-advance skips a participant with no clip instead of freezing', () => {
-	test('a null-clip item shows a "No clip available" message', () => {
-		// Need at least one non-null clip so the not-prepped gate doesn't trigger.
-		// The first item (index 0) has a clip, but the player starts on it.
-		// We can't control currentIndex from props, so we test via the queue:
-		// verify the "no clip" badge appears for null-clip items in the queue.
+describe('no-clip participants are marked in the Up Next queue', () => {
+	test('a null-clip item gets the lowercase "no clip" badge in the queue', () => {
+		// Named for what it actually asserts. It does NOT cover the player's own
+		// "No clip available for this person." message (+page.svelte:161, capital
+		// N) — toContain is case-sensitive, so this only ever matched the queue
+		// badge at +page.svelte:204. It also does not cover auto-advance, which
+		// is why this describe block no longer claims to.
+		//
+		// The player message and auto-advance both need currentIndex control,
+		// which props cannot provide — see the TODO below.
 		const ceremony = makeCeremony({
 			roster: [
 				{ position: 1, name: 'Has Clip', clip_url: 'https://example.com/audio/alice.mp3', ipa_text: null, ipa_source: null },
@@ -167,11 +181,19 @@ describe('regression: auto-advance skips a participant with no clip instead of f
 		expect(container.textContent).toContain('no clip');
 	});
 
-	// TODO(ceremony-player brief): real coverage of prev/next on a no-clip item.
-	// The deleted 'a null-clip item shows navigation buttons (prev/next)'
-	// asserted only `toContain('No Clip')` — which is the participant NAME from
-	// its own fixture, not a button. Mutation probe: deleting both .nav-btn
-	// pairs from the component left it passing. Real coverage needs
-	// getByRole('button', { name: /prev|next/i }) and a click that advances
-	// currentIndex, which requires driving the component rather than props.
+	// TODO(ceremony-player brief): three uncovered things, all needing the same
+	// capability — driving currentIndex, which props cannot do.
+	//   1. prev/next buttons. The deleted 'a null-clip item shows navigation
+	//      buttons (prev/next)' asserted only toContain('No Clip'), the
+	//      participant NAME from its own fixture, not a button. Probe: deleting
+	//      both .nav-btn pairs left it passing. Needs
+	//      getByRole('button', { name: /prev|next/i }) plus a click.
+	//   2. The player's "No clip available for this person." message
+	//      (+page.svelte:161), reachable only when the CURRENT item lacks a clip.
+	//   3. Auto-advance itself — armAdvance/handleEnded and the
+	//      advanced_seconds timer are untested end to end.
+	//
+	// Also note: deleting that test removed the suite's only assertion that a
+	// participant name renders anywhere on the ceremony page (the queue-name
+	// span at +page.svelte:202). Nothing asserts it today.
 });
