@@ -76,11 +76,11 @@ describe('⭐ "no phonetics" invariant — ceremony player', () => {
 		expect(container.textContent).not.toContain(SAMPLE_IPA);
 	});
 
-	// TODO(ceremony-player brief): real coverage of the finished screen.
-	// The deleted 'IPA does not leak on the finished screen' never rendered it:
-	// the component starts at currentIndex 0 and isFinished is
-	// `currentIndex >= roster.length`, so with the 2-item fixture the
-	// {:else if isFinished} branch never mounts. Its two assertions were
+	test('finished screen never displays IPA text', () => {
+		const { container } = renderCeremony(makeCeremony({ roster: [] }));
+		expect(container.textContent).toContain('Ceremony Complete');
+		expect(container.textContent).not.toMatch(new RegExp(`${SAMPLE_IPA}|/ˈbɒb/`));
+	});
 	// byte-identical to the test above.
 	//
 	// It IS reachable from props, contrary to what this TODO first claimed:
