@@ -84,13 +84,18 @@ npm run test:e2e     # playwright — needs a live backend on :8000 (see Gotchas
 
 Treat compose as broken-but-unfixed rather than as the quickstart. Fixing it is deferred work.
 
-CI is `.github/workflows/ci.yml` — tests only, no deploy and no secrets. Push and PR run the
-backend gate (`pytest -m "not integration"`) and the frontend gate (`npm ci && npm run check &&
-npm test`). A third job, `backend-integration`, installs the full ML stack and runs everything
-including the `@integration` tests; it fires only on `workflow_dispatch` or the weekly schedule.
+There is **no automated test gate.** Nothing runs the backend or frontend suites on push, on PR
+or on a schedule — both suites are local-only, via the commands above. `.github/workflows/ci.yml`
+was deleted; if you are looking for the gate it described, it is gone, not broken.
+
+The two workflows that remain are Claude Code integrations and neither runs a test:
+`claude-code-review.yml` reviews pull requests (`opened`, `synchronize`, `ready_for_review`,
+`reopened`), and `claude.yml` answers an `@claude` mention in an issue, an issue comment, a PR
+review or a PR review comment. Both need an `ANTHROPIC_API_KEY` repository secret.
 
 There is still **no linter and no formatter** — no ruff/black/eslint/prettier config anywhere.
-`svelte-check` is the only style-adjacent gate, and CI now runs it.
+`svelte-check` is the only style-adjacent check in the repo, and nothing runs it automatically —
+`npm run check` is a manual step.
 
 ## Architecture
 
@@ -135,8 +140,10 @@ it before committing. Current call sites: `routers/ceremony.py:65`, `routers/inv
 
 `POST /invite/{token}/recording` → transcode → recognize → store blob → `status="recorded"`.
 Preview (`/ipa/preview`) returns raw WAV bytes and **deliberately does not persist** — a real
-product rule with real tests. `POST /spaces/{id}/render` ("Prep Clips") batch-renders the roster
-on a `ThreadPoolExecutor`, with all DB writes and a single commit on the request thread.
+product rule, but its only test (`test_preview_does_not_store`) is `@integration`, so since the
+CI gate was deleted it runs nowhere automatically (see Gotchas). `POST /spaces/{id}/render`
+("Prep Clips") batch-renders the roster on a `ThreadPoolExecutor`, with all DB writes and a
+single commit on the request thread.
 
 Auth is two unrelated schemes: organizer sessions are opaque DB-backed tokens (no JWT, despite
 `pyjwt` being pinned), and participants authenticate purely by possessing an invite token.
@@ -170,8 +177,35 @@ former GKE setup did this at the nginx ingress. A bare adapter-node deploy with 
   (127 collected): 12 `@integration` tests skip without `kokoro`, 4 transcode tests skip without
   `ffmpeg`. Treat any *failure* as a regression; the skips are the design.
 - **Tests needing the real ML stack are marked `@pytest.mark.integration`** plus a `skipif` on
-  `kokoro` being importable. The marker lets CI deselect by intent; the skipif keeps any
-  kokoro-less machine from erroring. They run in the `backend-integration` CI job only.
+  `kokoro` being importable. The marker lets you deselect by intent (`-m "not integration"`);
+  the skipif keeps any kokoro-less machine from erroring.
+- **16 of the 127 backend tests now run nowhere automatically** — both skipped groups, not just
+  the marked ones. The 12 `@integration` tests need `kokoro`, which this venv does not have (see
+  the slim-venv Gotcha above), so exercising them takes a machine with the full ML stack. The
+  other 4 are `test_transcode.py`'s: they carry **no** marker, so the deleted push gate ran them
+  after its explicit `Install ffmpeg` step. Their guard is only
+  `skipif(shutil.which("ffmpeg") is None)`, so putting ffmpeg on `PATH` recovers all 4 locally —
+  unlike `kokoro`, nothing about the platform is in the way.
+- **What those 12 covered is wider than TTS.** They are the 5 render-ceremony tests, the 5
+  preview/confirm tests, `test_render_keeps_g2p_source_when_gemma_unavailable`, and
+  `test_warm_all_does_not_raise`. So what now runs nowhere also includes every route-level
+  `ipa_source` transition except `recognized`-on-upload, the preview-does-not-persist guard
+  (`test_preview_does_not_store` is its only test), and the only automated call to
+  `warm_all()` — the surface of the known g2p bug above. The *model-level* invariant is
+  unaffected: `TestParticipantIPAVariant` exercises `validate_ipa_invariant()` in 12 unmarked
+  tests.
+- **With no test gate, every brief's "measure before/after" step is entirely manual** — those
+  numbers exist only if they are run and recorded by hand.
+- **Three in-tree comments still name the deleted "push gate."** `app/tests/pytest.ini:9` (the
+  `integration` marker description, which `pytest --markers` prints, so the suite advertises a
+  gate the repo no longer has), `app/tests/test_models.py:207` (its "the other 11" counts
+  correctly — the other `@integration` tests besides itself — but the gate it says deselected
+  them is gone), and `app/tests/_deps.py:6` (justifies `find_spec` over a real import partly by
+  that CI job installing the full pinned requirements — now moot; only the slim-local-venv half
+  of the rationale still applies). Prose only, nothing breaks. All three were fenced out of the
+  brief that deleted the gate, so they belong to the brief that owns the test files. Note when
+  searching: `grep -i "push gate"` misses the hyphenated spelling in `_deps.py` — use
+  `push.gate`.
 - **Don't let a test depend on a dependency being absent.** The two
   `*_raises_when_pipeline_unavailable` tests used to pass only because `kokoro` wasn't installed,
   and failed the moment it was. They now force the condition themselves — nulling
