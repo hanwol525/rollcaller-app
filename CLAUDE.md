@@ -12,10 +12,23 @@ Built fast for a hackathon, now being converted into a maintainable portfolio ap
 
 ## Working agreement — read this first
 
-**Han controls all pushes, merges and PRs.** Work on a branch, commit locally, then **stop and
-report**. Do not `git push`, do not merge, do not open or merge a pull request, do not
-force-push, and do not create or delete remote branches — unless explicitly told to in the
-current session. "The work is finished" is not permission to push.
+> **Han owns the git history. Claude Code does not write to git — at all.**
+>
+> Make changes in the working tree and **leave them there, uncommitted and unstaged.** Han
+> reviews, stages, commits and pushes.
+>
+> **Permitted:** `git status`, `git diff`, `git log`, `git show`, `git grep`, `git ls-files`,
+> `git rev-list`, `git merge-base`, `git check-ignore`.
+>
+> **Forbidden** unless Han asks in the current session: `git add`/staging, `commit`, `push`,
+> `stash`, `branch`, `switch`/`checkout`, `merge`, `rebase`, `reset`, `tag`, `revert`,
+> `cherry-pick`, any PR or release operation, and editing anything under `.git/`.
+>
+> None of these is permission to commit: the work being finished; wanting it revertable; wanting
+> a clean tree; wanting to stage it "so it's easier to review"; a brief using numbered units; a
+> previous session having done it. If you believe a commit is necessary, **say so and stop.**
+>
+> Instead of committing, end each unit with a handoff report.
 
 **The code wins.** Where any brief, document, comment or this file contradicts what the code
 demonstrably does, the code is right. Flag the contradiction explicitly, reproduce it, then
@@ -24,7 +37,7 @@ it either. Every significant error in this project has been caught by this rule.
 
 **Work arrives as numbered briefs.** Each brief has a single concern and explicit scope fences.
 Respect them: do not fix things outside the current brief, even when you are looking straight at
-them — note them for the brief that owns them. One concern per commit.
+them — note them for the brief that owns them. One concern per unit.
 
 **Verify a finding before acting on it.** See the reference documents below: not every recorded
 defect has been verified, and acting on an unverified one has already cost a wrong brief.
@@ -172,10 +185,18 @@ former GKE setup did this at the nginx ingress. A bare adapter-node deploy with 
 
 ## Gotchas that cost time
 
-- **The local venv is deliberately slim** (Intel Mac — `torch`/`kokoro` have no macOS x86_64
-  wheels past certain versions). Expected local state is **111 passed, 16 skipped, 0 failed**
-  (127 collected): 12 `@integration` tests skip without `kokoro`, 4 transcode tests skip without
-  `ffmpeg`. Treat any *failure* as a regression; the skips are the design.
+- **The local venv is deliberately slim, and on this machine it cannot be otherwise** (Intel
+  x86_64, macOS 12.7.6). `torch`'s last macOS x86_64 wheel is **2.2.2**; later macOS wheels
+  are arm64-only and macOS 14+, and `requirements.txt` pins `torch==2.13.0+cpu`, which has no
+  macOS wheel at all. `kokoro` needs `torch`, so **the 12 `@integration` tests can never run on
+  this Mac** — they need Linux or an arm64 Mac on macOS 14+. Expected local state is **111
+  passed, 16 skipped, 0 failed** (127 collected): 12 skip without `kokoro`, 4 transcode tests
+  skip without `ffmpeg`. Treat any *failure* as a regression; the skips are the design.
+- **`pip install -r app/requirements.txt` does not succeed as written.** The
+  `torch==2.13.0+cpu` pin is a local version PyPI cannot serve, so the install needs
+  `--extra-index-url https://download.pytorch.org/whl/cpu`. That flag lives in
+  `backend/Dockerfile:18` and `README.md:122`, and was also in the deleted `ci.yml`, but it is
+  not in the Commands section above.
 - **Tests needing the real ML stack are marked `@pytest.mark.integration`** plus a `skipif` on
   `kokoro` being importable. The marker lets you deselect by intent (`-m "not integration"`);
   the skipif keeps any kokoro-less machine from erroring.
@@ -241,5 +262,5 @@ Prefer `DEPLOY-NOTES.md`, then `AUDIT.md` §7, over the README for anything fact
 
 ---
 
-*This file is living. The test/CI section changes as soon as the test-harness brief lands — update
-it in the same commit rather than leaving it stale.*
+*This file is living. When a brief changes how the repo actually behaves, update this file in
+the same unit rather than leaving it stale.*

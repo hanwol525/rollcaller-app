@@ -73,7 +73,6 @@ packaging==26.2
 pandas==3.0.3
 panphon==0.22.2
 passlib==1.7.4
-phonemizer==3.3.0
 phonemizer-fork==3.3.2
 pluggy==1.6.0
 preshed==3.0.13
