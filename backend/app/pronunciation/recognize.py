@@ -63,6 +63,12 @@ def _clean_phones(raw: str) -> str:
 
 
 def _fallback(wav_bytes: bytes) -> str:
-    """Placeholder IPA for dev/test without the model. Deterministic by length."""
+    """Placeholder IPA for dev/test without the model. Deterministic by length.
+
+    Bare, like every other producer — slashes are TTS markup only. This is
+    still a fake pronunciation; Unit 6's digit guard is what catches it. It
+    stays *truthy* on purpose: invite.py turns a falsy recognition into a 422,
+    which would disable recording a name wherever transformers is unavailable.
+    """
     length = len(wav_bytes)
-    return f"/rec{length % 1000:03d}/"
+    return f"rec{length % 1000:03d}"

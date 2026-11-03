@@ -280,6 +280,7 @@ def gemma_ipa(name: str) -> str | None:
     if bare is None:
         # No log here: _sanitize_ipa already reported the specific reason.
         return None
-    # Wrap in the same /.../ bracketing convention the eSpeak path produces
-    # (see _fallback / espeak_ipa), so gemma_ipa is a literal drop-in.
-    return f"/{bare}/"
+    # Bare IPA is the storage format; slashes are TTS markup, added only at
+    # the Kokoro boundary (tts.py). This is what _SYSTEM and _FEWSHOT above
+    # already ask the model for, and what _sanitize_ipa already returns.
+    return bare

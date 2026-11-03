@@ -150,7 +150,7 @@ class TestPronunciationFallbacks:
     contract (a non-empty str) and never the engine or the format.
     """
 
-    def test_g2p_fallback_returns_non_empty(self):
+    def test_g2p_returns_non_empty_ipa_for_a_normal_name(self):
         from app.pronunciation.g2p import g2p
         result = g2p("Alice")
         assert len(result) > 0

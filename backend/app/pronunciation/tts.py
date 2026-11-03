@@ -75,7 +75,7 @@ def synthesize(text: str, ipa: str | None = None) -> bytes:
 
     attempts: list[str] = []
     if ipa:
-      bare_ipa = ipa.strip().strip("/[]").strip()  # gemma_ipa returns /.../ — strip to bare
+      bare_ipa = ipa.strip().strip("/[]").strip()  # defensive: stored IPA is bare since Unit 4
       bare_ipa = bare_ipa.lstrip("ˈˌ")
       bare_ipa = bare_ipa.replace(" ˈ", " ").replace(" ˌ", " ")
       if bare_ipa:

@@ -84,9 +84,9 @@ def g2p(text: str) -> str:
 def espeak_ipa(text: str, language: str = DEFAULT_LANGUAGE) -> str:
     """eSpeak NG grapheme-to-phoneme — the fallback floor.
 
-    Returns **bare** IPA on the working path. Slashes are TTS markup and are
-    added at the Kokoro boundary (``tts.py``); ``_fallback`` still wraps, a
-    split Unit 4 settles.
+    Returns **bare** IPA. Slashes are TTS markup, added only at the Kokoro
+    boundary (``tts.py``). When eSpeak cannot help, ``_fallback`` returns ""
+    rather than inventing a pronunciation.
     """
     if language not in _backends:
         warm(language)                 # lazy self-heal on first use
@@ -97,8 +97,8 @@ def espeak_ipa(text: str, language: str = DEFAULT_LANGUAGE) -> str:
             ipa = (result[0] if isinstance(result, list) else str(result)).strip()
             if ipa:
                 return ipa
-            # A blank name phonemizes to "", which would make g2p() return a
-            # falsy string and break its non-empty contract.
+            # A blank name phonemizes to "". Worth distinguishing from a
+            # backend failure even though both end at _fallback.
             log.warning(
                 "eSpeak returned empty IPA for name=%r language=%r",
                 text, language,
@@ -114,14 +114,24 @@ def espeak_ipa(text: str, language: str = DEFAULT_LANGUAGE) -> str:
 
 
 def _fallback(text: str) -> str:
-    """Crude placeholder IPA. NOT linguistically accurate — for dev only."""
-    # Just return the text in slashes so it's distinguishable from real IPA.
-    cleaned = text.strip().lower().replace(" ", "_")
-    placeholder = f"/{cleaned}/"
-    # Per call, deliberately not deduped: this is the placeholder reaching a
-    # real ceremony, so which names it happened to is the whole point.
+    """No IPA available. Returns "" instead of inventing a pronunciation.
+
+    The empty string is deliberate, not a placeholder. ``tts.py`` guards its
+    pronunciation override with ``if ipa:``, so an empty value makes Kokoro
+    skip the override and voice the name with its own G2P — an honest English
+    attempt, where the old ``/name_with_underscores/`` got the spelling read
+    back as phonemes.
+
+    It is "" and not None because ``ceremony.py`` writes this straight to
+    ``ipa_text`` alongside ``ipa_source="g2p"``, and None there trips
+    ``validate_ipa_invariant``'s both-or-neither rule, failing the whole batch.
+    Refusing to render the name at all needs ``ceremony.py``, which this brief
+    fences off.
+    """
+    # Per call, deliberately not deduped: this is a real ceremony getting no
+    # pronunciation, so which names it happened to is the whole point.
     log.warning(
-        "placeholder IPA used for name=%r -> %r; this is spelling, not a "
-        "pronunciation", text, placeholder,
+        "no IPA for name=%r — Kokoro will voice the name directly, which may "
+        "mispronounce it", text,
     )
-    return placeholder
+    return ""

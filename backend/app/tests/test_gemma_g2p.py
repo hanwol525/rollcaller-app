@@ -155,18 +155,12 @@ class TestG2pFallsBackWhenGemmaUnavailable:
         assert isinstance(result, str)
         assert len(result) > 0
 
-    @pytest.mark.xfail(
-        reason="Unit 4 settles the slash convention: espeak_ipa returns bare "
-               "IPA now, while gemma_ipa still wraps",
-        strict=True,
-    )
-    def test_gemma_ipa_wraps_in_espeak_format(self, monkeypatch):
-        """gemma_ipa returns /.../ bracketed IPA to match the eSpeak convention,
-        so it is a literal drop-in for espeak_ipa (no new format invented).
+    def test_gemma_ipa_returns_bare_ipa_like_espeak(self, monkeypatch):
+        """Both engines return bare IPA, so either is a drop-in for the other.
 
-        ⚠️ The premise is now false: with the floor fixed, espeak_ipa returns
-        bare IPA. strict=True means Unit 4 cannot quietly forget to settle
-        this -- the moment it does, this starts failing as an unexpected pass.
+        This replaces an assertion that gemma_ipa wraps in /.../, which only
+        held while the eSpeak floor was broken and its placeholder was the one
+        path producing slashes.
         """
         # Provide config so gemma_ipa proceeds past the env check.
         monkeypatch.setenv("GEMMA_BASE_URL", "https://example.test/v1")
@@ -195,12 +189,54 @@ class TestG2pFallsBackWhenGemmaUnavailable:
         monkeypatch.setattr(httpx, "Client", _FakeClient)
 
         result = gemma_ipa("Bob")
-        # Must be wrapped in /.../ to match espeak_ipa's convention.
-        assert result == "/bɒb/"
-        # And it must be interchangeable in shape with espeak_ipa output.
+        # Bare: _sanitize_ipa strips any wrapper the model emits, and nothing
+        # re-adds one before storage.
+        assert result == "bɒb"
+        # And interchangeable in shape with espeak_ipa's output.
         espeak = espeak_ipa("Bob")
-        assert espeak.startswith("/") and espeak.endswith("/")
-        assert result.startswith("/") and result.endswith("/")
+        for value in (result, espeak):
+            assert not value.startswith("/") and not value.endswith("/")
+
+    def test_no_producer_returns_slash_wrapped_ipa(self, monkeypatch):
+        """The settled convention: bare in storage, slashes only at Kokoro.
+
+        Shape only -- the phoneme content is Unit 6's to assert. The stubbed
+        model deliberately replies *with* slashes, proving _sanitize_ipa
+        strips them rather than the caller re-adding them.
+        """
+        from app.pronunciation import recognize
+
+        _configure_gemma(monkeypatch)
+
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {"choices": [{"message": {"content": "/bɒb/"}}]}
+
+        class _Client:
+            def __init__(self, *a, **kw):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def post(self, *a, **kw):
+                return _Resp()
+
+        monkeypatch.setattr(httpx, "Client", _Client)
+
+        produced = {
+            "gemma_ipa": gemma_ipa("Bob"),
+            "espeak_ipa": espeak_ipa("Bob"),
+            "g2p._fallback": g2p_module._fallback("Hannah Wolfson"),
+            "recognize._fallback": recognize._fallback(b"x" * 4096),
+        }
+        for label, value in produced.items():
+            assert "/" not in value, f"{label} returned {value!r}"
 
     @pytest.mark.integration
     @pytest.mark.skipif(
@@ -286,7 +322,7 @@ class TestSwallowSitesAreNotSilent:
         # Seeded by membership, so the self-heal leaves it in place.
         monkeypatch.setattr(g2p_module, "_backends", {"en-us": _Boom()})
 
-        assert espeak_ipa("Bob") == "/bob/"
+        assert espeak_ipa("Bob") == ""
 
         msgs = _messages(caplog, "g2p")
         assert any(
@@ -294,9 +330,9 @@ class TestSwallowSitesAreNotSilent:
             for m in msgs
         ), msgs
 
-    def test_placeholder_path_names_the_participant(self, monkeypatch, caplog):
-        """The placeholder reaching a real ceremony is the one line that must
-        be per-name, not deduped -- which names it hit is the whole point."""
+    def test_no_ipa_path_names_the_participant(self, monkeypatch, caplog):
+        """A ceremony getting no pronunciation is the one line that must be
+        per-name, not deduped -- which names it hit is the whole point."""
         caplog.set_level(logging.WARNING)
         # Force a genuine warm failure instead of relying on espeak being
         # absent: with the floor fixed, a real backend phonemizes this name
@@ -305,14 +341,12 @@ class TestSwallowSitesAreNotSilent:
         monkeypatch.setattr(g2p_module, "_backends", {})
         _fake_phonemizer(monkeypatch, RuntimeError("espeak-ng not found"))
 
-        assert espeak_ipa("Hannah Wolfson") == "/hannah_wolfson/"
+        assert espeak_ipa("Hannah Wolfson") == ""
 
-        # Two records now: the warm failure, then the placeholder.
+        # Two records: the warm failure, then the no-IPA line.
         msgs = _messages(caplog, "g2p")
         assert any(
-            "placeholder IPA used" in m
-            and "'Hannah Wolfson'" in m
-            and "/hannah_wolfson/" in m
+            "no IPA for name=" in m and "'Hannah Wolfson'" in m
             for m in msgs
         ), msgs
 

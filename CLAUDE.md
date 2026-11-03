@@ -115,28 +115,38 @@ There is still **no linter and no formatter** — no ruff/black/eslint/prettier 
 ### The pronunciation pipeline
 
 `app/pronunciation/orchestrator.py` is a thin façade over four stages; routers call only the
-façade. Every stage defines a `warm()`, but **only three of the four self-heal on first use** —
-see the known bug below.
+façade. Every stage defines a `warm()`, all four self-heal on first use, and
+`orchestrator.warm_all()` runs from the FastAPI lifespan (`main.py`).
 
 | Stage | Module | Does | Lazy self-heal |
 |---|---|---|---|
 | transcode | `transcode.py` | ffmpeg → canonical 16 kHz mono WAV (browser sends WebM/Opus or MP4/AAC) | ✅ re-probes PATH |
 | recognize | `recognize.py` | wav2vec2 CTC (`facebook/wav2vec2-lv-60-espeak-cv-ft`) audio → IPA | ✅ |
-| g2p | `g2p.py` → `gemma.py` | LLM over an OpenAI-compatible endpoint; the eSpeak fallback below it is **dead code** | 🔴 **none** |
+| g2p | `g2p.py` → `gemma.py` | LLM over an OpenAI-compatible endpoint, with a working eSpeak NG floor beneath it | ✅ per language |
 | tts | `tts.py` | Kokoro 82M, IPA → WAV, using `[name](/ipa/)` pronunciation-override markup | ✅ |
 
-**All audio comes from Kokoro.** eSpeak in this codebase only ever produces IPA *text*, and
-currently never even runs. Robotic output means Kokoro is voicing bad IPA — never that eSpeak
-synthesized something.
+**All audio comes from Kokoro.** eSpeak only ever produces IPA *text* — it does run now, but it
+never synthesizes. Robotic output means Kokoro is voicing bad IPA, never that eSpeak synthesized
+something.
 
-🔴 **Known live bug — `g2p()` returns placeholder pseudo-IPA.** `orchestrator.warm_all()` is
-called by nothing in production (the lifespan runs `init_db()` and `seed_organizer()` only), and
-unlike the other stages `g2p.espeak_ipa()` has **no lazy self-heal** — it checks
-`if _backend is not None` and never calls `warm()`. So `_backend` stays `None` and `g2p("Hannah
-Wolfson")` returns `/hannah_wolfson/`, which Kokoro then reads as phonemes. `g2p.warm()` is dead
-twice over: it calls `phonemizer.backend.Backend`, which does not exist (the class is
-`EspeakBackend`). Fixing the symbol alone changes nothing — `warm_all()` would still never be
-called. See `AUDIT.md` §4.1 (§7-verified).
+**Bare IPA is the storage format.** Every producer (`gemma_ipa`, `espeak_ipa`, both `_fallback`s)
+returns IPA with no `/slashes/`. Slashes are Kokoro markup and are added only at the TTS boundary,
+by `tts.py`. The `.strip("/[]")` there is defensive, not load-bearing.
+
+✅ **Fixed in Brief 03 — the eSpeak floor works.** It used to return placeholder pseudo-IPA:
+`warm()` called `phonemizer.backend.Backend`, a symbol phonemizer does not export, the
+`AttributeError` was swallowed with no log line, and `espeak_ipa()` had no lazy self-heal — so
+`g2p("Hannah Wolfson")` returned `/hannah_wolfson/` and Kokoro read the spelling as phonemes. Now
+it returns `hˈænə wˈʊlfsən`.
+
+⚠️ `AUDIT.md` §4.1 still describes the old state as live, and §7 holds a **wrong refutation**
+about it — see the corrected row in that ledger. Prefer this file for the g2p path.
+
+When eSpeak genuinely cannot help, the floor returns `""` rather than inventing a pronunciation,
+and Kokoro voices the name with its own G2P. That is honest but not a *visible* failure: a clip is
+still produced. Refusing to render the name needs `routers/ceremony.py`, still deferred.
+Constructing an `EspeakBackend` costs ~2.3 s, so failures are cached per language rather
+than retried per name.
 
 ### The IPA invariant
 
