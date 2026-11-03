@@ -198,6 +198,61 @@ class TestG2pFallsBackWhenGemmaUnavailable:
         assert isinstance(result, str)
         assert len(result) > 0
 
+    def test_espeak_produces_real_phonemes_not_the_spelling(self, monkeypatch):
+        """The first content assertion on the pipeline's actual output.
+
+        AUDIT.md §5.5 calls "nothing asserts what g2p() returns" the biggest
+        untested risk, and it was right: for months g2p("Siobhan") returned
+        "/siobhan/" while every test passed, because they only ever checked
+        isinstance and len > 0 -- which a placeholder satisfies perfectly.
+        """
+        monkeypatch.setattr("app.pronunciation.g2p.gemma_ipa", lambda _n: None)
+        assert espeak_ipa("Bob") == "bˈɑːb"
+        assert g2p("Siobhan") == "ʃɪvˈɔːn"
+        assert g2p("Siobhan") != "/siobhan/"      # the old placeholder, named
+
+    def test_hard_names_seed(self, monkeypatch):
+        """Seed of the eval set Brief 04 expands. Small, and honest.
+
+        Exact IPA only where eSpeak is demonstrably right. The anglicised
+        ones are asserted as "real IPA, not a placeholder" and no more --
+        pinning eSpeak's current output as *expected* would fight Brief 04,
+        whose whole job is to improve exactly those names.
+
+        Recorded under espeak-ng 1.52.0; the engine is pinned by
+        test_garbage_guard_constants_match_espeak in test_models.py.
+        """
+        monkeypatch.setattr("app.pronunciation.g2p.gemma_ipa", lambda _n: None)
+
+        EXACT = {
+            "Bob": "bˈɑːb",
+            "Siobhan": "ʃɪvˈɔːn",
+            "Hannah Wolfson": "hˈænə wˈʊlfsən",
+        }
+        # eSpeak anglicises these today. Brief 04's targets, not assertions:
+        #   Malgorzata -> mˌælɡɔːɹzˈɑːɾə   (Polish is maw-go-ZHA-ta)
+        #   Saoirse    -> sˈɜːʃə
+        #   Dmitri     -> dəmˈiːtɹi
+        #   Xiuying    -> zˈɪaɪɪŋ
+        ANGLICISED = ("Malgorzata", "Saoirse", "Dmitri", "Xiuying")
+
+        failures = []
+        for name, expected in EXACT.items():
+            got = g2p(name)
+            if got != expected:
+                failures.append(f"{name!r}: expected {expected!r}, got {got!r}")
+        for name in ANGLICISED:
+            got = g2p(name)
+            if not got:
+                failures.append(f"{name!r}: empty")
+            elif got == f"/{name.lower()}/":
+                failures.append(f"{name!r}: still the placeholder, got {got!r}")
+            elif got.isascii():
+                failures.append(
+                    f"{name!r}: all-ASCII {got!r} -- that is spelling, not IPA"
+                )
+        assert not failures, failures
+
     def test_gemma_ipa_returns_bare_ipa_like_espeak(self, monkeypatch):
         """Both engines return bare IPA, so either is a drop-in for the other.
 

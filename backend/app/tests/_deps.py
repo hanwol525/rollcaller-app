@@ -32,6 +32,14 @@ def _spec_exists(name: str) -> bool:
 KOKORO_AVAILABLE = _spec_exists("kokoro")
 """True when the Kokoro TTS package is importable — gates the @integration tests."""
 
+PHONEMIZER_AVAILABLE = _spec_exists("phonemizer")
+"""True when `phonemizer` is importable.
+
+Gates the check of tts.py's garbage-guard constants against what espeak
+actually produces, and the espeak-ng version the content assertions were
+recorded under. Needs no ML stack, so it stays **unmarked** and runs here.
+"""
+
 HF_HUB_AVAILABLE = _spec_exists("huggingface_hub")
 """True when `huggingface_hub` is importable.
 

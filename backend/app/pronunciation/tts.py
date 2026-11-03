@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import logging
+import re
 import unicodedata
 
 import numpy as np
@@ -87,6 +88,75 @@ def _kokoro_wav(source: str) -> bytes | None:
     return buf.getvalue()
 
 
+# ---------------------------------------------------------------------------
+# Garbage guard
+# ---------------------------------------------------------------------------
+# eSpeak narrates instead of pronouncing when it cannot read a name: it spells
+# the letters out, names the script, or reads digits aloud. Kokoro would voice
+# any of that confidently at a graduation, so none of it may become a
+# pronunciation override.
+#
+# Both sets are a snapshot of what espeak-ng 1.52.0 produces;
+# test_garbage_guard_constants_match_espeak re-derives them and pins the
+# engine version, so a drift shows up as an engine move rather than as a
+# mysterious mismatch.
+_DIGIT_RE = re.compile(r"\d")
+
+# The IPA espeak gives for each English letter *name* ("A" -> ˈeɪ, "G" -> dʒˈiː).
+_LETTER_NAMES = frozenset({
+    "ˈeɪ", "bˈiː", "sˈiː", "dˈiː", "ˈiː", "ˈɛf", "dʒˈiː", "ˈeɪtʃ", "ˈaɪ",
+    "dʒˈeɪ", "kˈeɪ", "ˈɛl", "ˈɛm", "ˈɛn", "ˈoʊ", "pˈiː", "kjˈuː", "ˈɑːɹ",
+    "ˈɛs", "tˈiː", "jˈuː", "vˈiː", "dˈʌbəljˌuː", "ˈɛks", "wˈaɪ", "zˈiː",
+})
+
+# espeak's own word "letter", in both stress variants. It lands token-final
+# when espeak names a script it cannot read, e.g. 李雷 phonemises to
+# "tʃˈaɪniːzlˌɛɾɚ tʃˈaɪniːzlˌɛɾɚ" — "Chinese letter", twice.
+_NARRATION_MARKERS = frozenset({"lˈɛɾɚ", "lˌɛɾɚ"})
+
+
+def _reject_reason(name: str, ipa: str) -> str | None:
+    """Why this IPA must not reach Kokoro, or None when it is usable.
+
+    Returns a sentence rather than a bool so the caller can log *which* rule
+    fired — the three failure modes need different fixes.
+    """
+    found = _DIGIT_RE.search(ipa)
+    if found:
+        return f"contains the digit {found.group(0)!r}, which Kokoro reads aloud"
+
+    tokens = ipa.split()
+
+    # Letter-name IPA is *correct* when the name contains initials, so the run
+    # is only suspicious when it outruns them: "J R R Tolkien" legitimately
+    # phonemises to three letter names, while "Nguyễn" phonemises to four and
+    # has no initials at all.
+    initials = sum(
+        1 for word in name.replace("-", " ").replace(".", " ").split()
+        if len(word) == 1
+    )
+    longest = run = 0
+    for token in tokens:
+        run = run + 1 if token in _LETTER_NAMES else 0
+        longest = max(longest, run)
+    if longest >= 2 and longest > initials:
+        return (
+            f"{longest} consecutive letter names against {initials} initials "
+            "in the name, so eSpeak spelled it out instead of pronouncing it"
+        )
+
+    # Token-final only: a real surname can *start* with the same phonemes --
+    # "Letterman" is lˈɛɾɚmən -- and must not be rejected for it.
+    for token in tokens:
+        if any(token.endswith(marker) for marker in _NARRATION_MARKERS):
+            return (
+                f"token {token!r} ends in eSpeak's word for \"letter\", so it "
+                "named the script instead of pronouncing the name"
+            )
+
+    return None
+
+
 def synthesize(text: str, ipa: str | None = None) -> bytes:
     """Synthesize speech for a name, preferring an IPA pronunciation override.
 
@@ -116,6 +186,13 @@ def synthesize(text: str, ipa: str | None = None) -> bytes:
               text, bare_ipa, renderable,
           )
       bare_ipa = renderable
+      refusal = _reject_reason(text, bare_ipa)
+      if refusal:
+          log.warning(
+              "IPA refused for name=%r: %s. Kokoro will voice the name "
+              "directly instead (ipa=%r)", text, refusal, bare_ipa,
+          )
+          bare_ipa = ""        # falls through to the plain-name attempt below
       bare_ipa = bare_ipa.lstrip("ˈˌ")
       bare_ipa = bare_ipa.replace(" ˈ", " ").replace(" ˌ", " ")
       if bare_ipa:

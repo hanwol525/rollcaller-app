@@ -199,14 +199,25 @@ former GKE setup did this at the nginx ingress. A bare adapter-node deploy with 
   x86_64, macOS 12.7.6). `torch`'s last macOS x86_64 wheel is **2.2.2**; later macOS wheels
   are arm64-only and macOS 14+, and `requirements.txt` pins `torch==2.13.0+cpu`, which has no
   macOS wheel at all. `kokoro` needs `torch`, so **the 12 `@integration` tests can never run on
-  this Mac** — they need Linux or an arm64 Mac on macOS 14+. Expected local state is **140
-  passed, 16 skipped, 0 failed** (156 collected): 12 skip without `kokoro`, 4 transcode tests
+  this Mac** — they need Linux or an arm64 Mac on macOS 14+. Expected local state is **146
+  passed, 16 skipped, 0 failed** (162 collected): 12 skip without `kokoro`, 4 transcode tests
   skip without `ffmpeg`. Treat any *failure* as a regression; the skips are the design.
 - **`pip install -r app/requirements.txt` does not succeed as written.** The
   `torch==2.13.0+cpu` pin is a local version PyPI cannot serve, so the install needs
   `--extra-index-url https://download.pytorch.org/whl/cpu`. That flag lives in
   `backend/Dockerfile:18` and `README.md:122`, and was also in the deleted `ci.yml`, but it is
   not in the Commands section above.
+- **A garbage guard sits at the TTS boundary, and it refuses rather than raises.**
+  `tts.py:_reject_reason` rejects IPA that contains a digit, that is mostly consecutive English
+  letter *names*, or whose token ends in eSpeak's word for "letter" (how it narrates a script it
+  cannot read: 李雷 → `tʃˈaɪniːzlˌɛɾɚ tʃˈaɪniːzlˌɛɾɚ`, "Chinese letter" twice). On a hit it logs
+  and clears the override, so Kokoro voices the plain name via its own G2P. It deliberately does
+  **not** raise: `ceremony.py:97`'s `future.result()` is unguarded, so one odd name would 500 the
+  whole roster. Two non-obvious constraints: letter-name IPA is *correct* for initials, so the run
+  must exceed the name's single-character words or "J R R Tolkien" is rejected; and the "letter"
+  check is token-**final**, or `Letterman` → `lˈɛɾɚmən` is rejected. Before the guard,
+  `recognize._fallback`'s `rec044` reached Kokoro as `[Alice Lee](/rec044/)` through the ceremony
+  batch render with no client involvement.
 - **Kokoro's phoneme vocabulary is a closed set of 114 symbols, and anything outside it is
   dropped silently.** `kokoro/model.py` does
   `filter(lambda i: i is not None, map(lambda p: self.vocab.get(p), phonemes))` — no unknown

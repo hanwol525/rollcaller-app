@@ -5,7 +5,11 @@ import pytest
 from pydantic import ValidationError
 
 from app.models import Participant, ParticipantStatus, IPASource
-from app.tests._deps import HF_HUB_AVAILABLE, KOKORO_AVAILABLE
+from app.tests._deps import (
+    HF_HUB_AVAILABLE,
+    KOKORO_AVAILABLE,
+    PHONEMIZER_AVAILABLE,
+)
 
 
 class TestParticipantIPAVariant:
@@ -234,6 +238,120 @@ class TestPronunciationFallbacks:
         tts.synthesize("Bob", ipa="bˈɑːb")
         assert not [r for r in caplog.records
                     if r.name == "app.pronunciation.tts"]
+
+    def test_garbage_guard_refuses_each_failure_mode(self):
+        """Each rule names its own cause -- the three need different fixes."""
+        from app.pronunciation.tts import _reject_reason
+        cases = [
+            # The live one: recognize._fallback reaches the renderer today via
+            # the ceremony batch render, with no client involvement at all.
+            ("Alice Lee", "rec044", "digit"),
+            ("Nguyen", "ˈɛn dʒˈiː jˈuː wˈaɪ", "letter names"),
+            ("Li Lei", "tʃˈaɪniːzlˌɛɾɚ", "letter"),
+        ]
+        for name, ipa, fragment in cases:
+            reason = _reject_reason(name, ipa)
+            assert reason is not None, f"{name!r}/{ipa!r} was not refused"
+            assert fragment in reason, reason
+
+    def test_garbage_guard_passes_real_pronunciations(self):
+        """A guard that rejects real names is worse than no guard.
+
+        Initials are the trap: letter-name IPA is *correct* for them. And
+        "Letterman" begins with the same phonemes as eSpeak's word "letter",
+        which is why the marker check is token-final.
+        """
+        from app.pronunciation.tts import _reject_reason
+        clean = [
+            ("Bob", "bˈɑːb"),
+            ("Siobhan", "ʃɪvˈɔːn"),
+            ("Hannah Wolfson", "hˈænə wˈʊlfsən"),
+            ("Letterman", "lˈɛɾɚmən"),
+            ("J R R Tolkien", "dʒˈeɪ ˈɑːɹ ˈɑːɹ tolkˈiːn"),
+            ("T S Eliot", "tˈiː ˈɛs ˈɛlɪət"),
+            ("W E B Du Bois", "dˈʌbəljˌuː ˈiː bˈiː dˈuː bˈɔɪz"),
+        ]
+        refused = [(n, i, _reject_reason(n, i)) for n, i in clean
+                   if _reject_reason(n, i) is not None]
+        assert not refused, refused
+
+    def test_refused_ipa_still_produces_a_clip_from_the_name(
+        self, monkeypatch, caplog
+    ):
+        """Refusing the override must not fail the render.
+
+        ceremony.py's future.result() is unguarded, so raising here would 500
+        the whole roster over one odd name. Kokoro gets the plain name.
+        """
+        import logging as _logging
+        from app.pronunciation import tts
+        caplog.set_level(_logging.WARNING)
+        monkeypatch.setattr(tts, "_pipeline", object())
+
+        seen = []
+
+        def _fake_wav(source):
+            seen.append(source)
+            return b"RIFF"
+
+        monkeypatch.setattr(tts, "_kokoro_wav", _fake_wav)
+
+        assert tts.synthesize("Alice Lee", ipa="rec044") == b"RIFF"
+        # The plain name, never the [name](/ipa/) override form.
+        assert seen == ["Alice Lee"], seen
+        msgs = [r.getMessage() for r in caplog.records
+                if r.name == "app.pronunciation.tts"]
+        assert any("IPA refused" in m and "rec044" in m for m in msgs), msgs
+
+    @pytest.mark.skipif(
+        not PHONEMIZER_AVAILABLE, reason="phonemizer not installed"
+    )
+    def test_garbage_guard_constants_match_espeak(self):
+        """The guard's constants are a snapshot of one espeak-ng build, and
+        test_gemma_g2p.py's expected IPA is the baseline Brief 04 measures
+        against -- so this records the engine, not just the strings.
+
+        Asserts the *version*, so a `brew upgrade espeak-ng` fails here as
+        "the engine moved" rather than as a mysterious IPA mismatch someone
+        fixes by editing one expected string at a time. Reports the library
+        *path* without asserting it: this machine has two espeak-ng 1.52.0
+        installs (brew's and the one espeakng-loader bundles) that produce
+        identical IPA, and the Docker image apt-installs it elsewhere again.
+        """
+        from phonemizer.backend.espeak.wrapper import EspeakWrapper
+        from app.pronunciation import g2p as g2p_module
+        from app.pronunciation.tts import _LETTER_NAMES, _NARRATION_MARKERS
+
+        library = EspeakWrapper.library()
+        version = EspeakWrapper().version
+        assert version == (1, 52, 0), (
+            f"espeak-ng moved to {version} (library={library}). The guard "
+            "constants and the expected IPA in test_gemma_g2p.py were all "
+            "recorded under 1.52.0 -- re-derive them together rather than "
+            "editing expected strings one by one."
+        )
+
+        # Reuse the app's own warmed backend rather than building another:
+        # constructing an EspeakBackend costs ~2.3 s.
+        g2p_module.warm()
+        backend = g2p_module._backends[g2p_module.DEFAULT_LANGUAGE]
+        assert backend is not None, f"eSpeak unavailable (library={library})"
+
+        derived = {
+            backend.phonemize([c.upper()], strip=True)[0].strip()
+            for c in "abcdefghijklmnopqrstuvwxyz"
+        }
+        assert derived == set(_LETTER_NAMES), {
+            "espeak has": sorted(derived - set(_LETTER_NAMES)),
+            "constant has stale": sorted(set(_LETTER_NAMES) - derived),
+            "library": library,
+        }
+
+        marker = backend.phonemize(["letter"], strip=True)[0].strip()
+        assert marker in _NARRATION_MARKERS, (
+            marker, sorted(_NARRATION_MARKERS), library,
+        )
+        assert marker.replace("ˈ", "ˌ") in _NARRATION_MARKERS
 
     @pytest.mark.skipif(
         not HF_HUB_AVAILABLE, reason="huggingface_hub not installed"
