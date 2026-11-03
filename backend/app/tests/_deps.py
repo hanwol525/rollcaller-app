@@ -3,11 +3,12 @@
 Mirrors the `shutil.which("ffmpeg")` idiom already used in test_transcode.py,
 but for an importable package rather than a binary on PATH.
 
-Deliberately uses `find_spec` rather than a real import: the push-gate CI job
-installs the full pinned requirements (so kokoro IS on sys.path) and must not
-pay the cost of importing it — importing kokoro pulls torch. The marker, not
-this probe, is what keeps the heavy tests out of that job; this is the safety
-net for environments that simply lack the package, such as the slim local venv.
+Deliberately uses `find_spec` rather than a real import: wherever the full
+pinned requirements are installed kokoro IS on sys.path, and collection must
+not pay the cost of importing it — importing kokoro pulls torch. The marker,
+not this probe, is what keeps the heavy tests out of a run that deselects
+them; this is the safety net for environments that simply lack the package,
+such as the slim local venv.
 
 Known limitation, accepted: `find_spec` answers "is there a module on the path",
 not "can it be imported". A broken or half-installed kokoro reports available
@@ -30,3 +31,12 @@ def _spec_exists(name: str) -> bool:
 
 KOKORO_AVAILABLE = _spec_exists("kokoro")
 """True when the Kokoro TTS package is importable — gates the @integration tests."""
+
+HF_HUB_AVAILABLE = _spec_exists("huggingface_hub")
+"""True when `huggingface_hub` is importable.
+
+Gates the check of tts.py's Kokoro-vocabulary constants against the model's
+published config. That check needs only this package — not kokoro, not torch —
+so it stays **unmarked** and runs anywhere the config is reachable, rather than
+joining the @integration set that cannot run on a macOS x86_64 machine at all.
+"""

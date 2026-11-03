@@ -199,14 +199,26 @@ former GKE setup did this at the nginx ingress. A bare adapter-node deploy with 
   x86_64, macOS 12.7.6). `torch`'s last macOS x86_64 wheel is **2.2.2**; later macOS wheels
   are arm64-only and macOS 14+, and `requirements.txt` pins `torch==2.13.0+cpu`, which has no
   macOS wheel at all. `kokoro` needs `torch`, so **the 12 `@integration` tests can never run on
-  this Mac** — they need Linux or an arm64 Mac on macOS 14+. Expected local state is **111
-  passed, 16 skipped, 0 failed** (127 collected): 12 skip without `kokoro`, 4 transcode tests
+  this Mac** — they need Linux or an arm64 Mac on macOS 14+. Expected local state is **140
+  passed, 16 skipped, 0 failed** (156 collected): 12 skip without `kokoro`, 4 transcode tests
   skip without `ffmpeg`. Treat any *failure* as a regression; the skips are the design.
 - **`pip install -r app/requirements.txt` does not succeed as written.** The
   `torch==2.13.0+cpu` pin is a local version PyPI cannot serve, so the install needs
   `--extra-index-url https://download.pytorch.org/whl/cpu`. That flag lives in
   `backend/Dockerfile:18` and `README.md:122`, and was also in the deleted `ci.yml`, but it is
   not in the Commands section above.
+- **Kokoro's phoneme vocabulary is a closed set of 114 symbols, and anything outside it is
+  dropped silently.** `kokoro/model.py` does
+  `filter(lambda i: i is not None, map(lambda p: self.vocab.get(p), phonemes))` — no unknown
+  token, no error. So an unrenderable symbol does not degrade a clip, it **deletes a sound from
+  it**. The set lives in the model's `config.json` on Hugging Face. What matters at the IPA
+  boundary: the only combining mark in it is **U+0303** (nasalisation); the only precomposed
+  Latin letters are **`ç æ ø œ`**; ASCII **`.`** (the IPA syllable separator) is in it; and every
+  accented Latin letter — `á à â ä å ã é è ê ë í ì î ï ó ò ô ö õ ú ù û ü ñ ý ÿ š ž ł` — is
+  **not**. `tts.py`'s `_normalise_for_kokoro` folds for this and `gemma.py`'s `_GRAPHEME_MAP`
+  maps the leaked graphemes to phonemes the set contains. Both encode a config fetched at
+  runtime, so `test_kokoro_constants_match_published_vocabulary` is what catches drift — it
+  needs only `huggingface_hub`, so it is unmarked and does run here.
 - **Tests needing the real ML stack are marked `@pytest.mark.integration`** plus a `skipif` on
   `kokoro` being importable. The marker lets you deselect by intent (`-m "not integration"`);
   the skipif keeps any kokoro-less machine from erroring.

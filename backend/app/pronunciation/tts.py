@@ -40,6 +40,39 @@ def _ascii_fold(s: str) -> str:
     return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii").strip()
 
 
+# Kokoro maps phonemes with `self.vocab.get(p)` and filters out the misses, so
+# a symbol outside its 114-entry vocabulary is dropped **silently** -- it
+# deletes a sound from the clip rather than approximating it. These two sets
+# are the part of that vocabulary which matters when folding IPA, read from
+# the model's config.json. test_kokoro_constants_match_published_vocabulary
+# guards them against drift, because that config is fetched at runtime.
+#
+# Precomposed letters Kokoro accepts whole. NFD would split each into a base
+# plus a combining mark the vocabulary lacks -- that is how `ç` became `c`.
+_KOKORO_PRECOMPOSED = frozenset("çæøœ")
+# The only combining mark in the vocabulary: nasalisation.
+_KOKORO_COMBINING = frozenset("\u0303")
+
+
+def _normalise_for_kokoro(ipa: str) -> str:
+    """Fold IPA to symbols Kokoro's vocabulary can actually voice.
+
+    Keeps anything Kokoro accepts whole; otherwise decomposes and keeps the
+    base plus any combining mark it accepts. So `ç` and a nasal tilde survive,
+    while an acute accent is folded to its base vowel instead of deleting
+    that vowel from the audio.
+    """
+    out: list[str] = []
+    for ch in ipa:
+        if ch in _KOKORO_PRECOMPOSED:
+            out.append(ch)
+            continue
+        for part in unicodedata.normalize("NFD", ch):
+            if not unicodedata.combining(part) or part in _KOKORO_COMBINING:
+                out.append(part)
+    return "".join(out)
+
+
 def _kokoro_wav(source: str) -> bytes | None:
     """Run one Kokoro pass on `source`; return WAV bytes, or None if no audio."""
     parts = []
@@ -76,6 +109,13 @@ def synthesize(text: str, ipa: str | None = None) -> bytes:
     attempts: list[str] = []
     if ipa:
       bare_ipa = ipa.strip().strip("/[]").strip()  # defensive: stored IPA is bare since Unit 4
+      renderable = _normalise_for_kokoro(bare_ipa)
+      if renderable != bare_ipa:
+          log.warning(
+              "IPA folded to Kokoro's vocabulary for name=%r: %r -> %r",
+              text, bare_ipa, renderable,
+          )
+      bare_ipa = renderable
       bare_ipa = bare_ipa.lstrip("ˈˌ")
       bare_ipa = bare_ipa.replace(" ˈ", " ").replace(" ˌ", " ")
       if bare_ipa:

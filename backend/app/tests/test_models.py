@@ -5,7 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.models import Participant, ParticipantStatus, IPASource
-from app.tests._deps import KOKORO_AVAILABLE
+from app.tests._deps import HF_HUB_AVAILABLE, KOKORO_AVAILABLE
 
 
 class TestParticipantIPAVariant:
@@ -195,6 +195,78 @@ class TestPronunciationFallbacks:
         monkeypatch.setattr(tts, "warm", lambda: None)
         with pytest.raises(RuntimeError, match="pipeline not loaded"):
             orchestrator.render_clip("Bob", ipa_text="/bɒb/")
+
+    def test_normalise_for_kokoro_keeps_what_kokoro_accepts(self):
+        """`ç` and the nasal tilde are both in Kokoro's vocabulary, so the
+        fold must leave them alone. This is the defect the sanitizer used to
+        have, relocated here and corrected."""
+        from app.pronunciation.tts import _normalise_for_kokoro
+        assert _normalise_for_kokoro("ɪç") == "ɪç"
+        assert _normalise_for_kokoro("ɐ̃ʊ̃") == "ɐ̃ʊ̃"
+        assert _normalise_for_kokoro("bˈɑːb") == "bˈɑːb"
+        for ch in "æøœ":
+            assert _normalise_for_kokoro(ch) == ch
+
+    def test_normalise_for_kokoro_folds_what_it_does_not(self):
+        """An accented Latin letter is absent from the vocabulary, and Kokoro
+        drops unknown phonemes silently -- so folding to the base keeps the
+        sound instead of deleting it from the clip."""
+        from app.pronunciation.tts import _normalise_for_kokoro
+        assert _normalise_for_kokoro("álvaro") == "alvaro"
+        assert _normalise_for_kokoro("ã") == "a\u0303"       # precomposed -> base + nasal
+        assert _normalise_for_kokoro("t͡ʃ") == "tʃ"            # tie bar is not in the vocabulary
+
+    def test_synthesize_logs_when_ipa_is_folded(self, monkeypatch, caplog):
+        """A fold is a silent degradation unless it says so."""
+        import logging as _logging
+        from app.pronunciation import tts
+        caplog.set_level(_logging.WARNING)
+        # Non-None pipeline skips the warm/raise; stub the Kokoro call itself.
+        monkeypatch.setattr(tts, "_pipeline", object())
+        monkeypatch.setattr(tts, "_kokoro_wav", lambda source: b"RIFF")
+
+        tts.synthesize("Álvaro", ipa="álvaro")
+        msgs = [r.getMessage() for r in caplog.records
+                if r.name == "app.pronunciation.tts"]
+        assert any("folded to Kokoro" in m and "alvaro" in m for m in msgs), msgs
+
+        caplog.clear()
+        tts.synthesize("Bob", ipa="bˈɑːb")
+        assert not [r for r in caplog.records
+                    if r.name == "app.pronunciation.tts"]
+
+    @pytest.mark.skipif(
+        not HF_HUB_AVAILABLE, reason="huggingface_hub not installed"
+    )
+    def test_kokoro_constants_match_published_vocabulary(self):
+        """The vocabulary constants are hand-derived from a config fetched at
+        runtime, so they can drift silently -- and in the direction worse than
+        the bug they fix. If `ç` ever left the vocabulary, keeping it
+        undecomposed would make Kokoro drop the consonant outright, where the
+        old code at least produced `c`.
+
+        Unmarked on purpose: this needs only huggingface_hub, not kokoro or
+        torch, so it runs on a machine where the @integration tests cannot.
+        """
+        import json
+        from app.pronunciation.gemma import _GRAPHEME_MAP
+        from app.pronunciation.tts import (
+            _KOKORO_COMBINING,
+            _KOKORO_PRECOMPOSED,
+        )
+
+        try:
+            from huggingface_hub import hf_hub_download
+            path = hf_hub_download("hexgrad/Kokoro-82M", "config.json")
+            with open(path, encoding="utf-8") as fh:
+                vocab = set(json.load(fh)["vocab"])
+        except Exception as e:  # offline, rate-limited, repo moved
+            pytest.skip(f"Kokoro config unreachable ({type(e).__name__}: {e})")
+
+        assert _KOKORO_PRECOMPOSED <= vocab, sorted(_KOKORO_PRECOMPOSED - vocab)
+        assert _KOKORO_COMBINING <= vocab, sorted(_KOKORO_COMBINING - vocab)
+        targets = set("".join(_GRAPHEME_MAP.values()))
+        assert targets <= vocab, sorted(targets - vocab)
 
     def test_orchestrator_recognize_recording(self):
         from app.pronunciation.orchestrator import recognize_recording

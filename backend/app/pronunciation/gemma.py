@@ -64,35 +64,69 @@ _FENCE_RE = re.compile(r"```[^\n]*")  # strip ```lang fences (opening + closing)
 _SLASH_RE = re.compile(r"/([^/\n]+)/")
 _BRACKET_RE = re.compile(r"\[([^\]\n]+)\]")
 _LABEL_RE = re.compile(r"^\s*[A-Za-z]{1,20}:\s*", re.IGNORECASE)
-_PUNCT_RE = re.compile(r"[.,?!;:]")
-# Common English words that should never appear in bare IPA output. IPA uses
-# non-ASCII vowels, so ASCII-only word patterns are prose.
+# ASCII sentence punctuation. The period is exempt unless whitespace follows
+# it: "ˈmɑːkɪs.ˈdʒuːniə" uses it as the IPA syllable separator, and U+002E is
+# in Kokoro's vocabulary, so a bare period is legitimate input.
+_PUNCT_RE = re.compile(r"[,?!;:]|\.(?=\s)")
+# Words that never appear as a complete IPA transcription of a name. One match
+# is enough to call the whole candidate prose.
 _PROSE_RE = re.compile(
     r"\b(the|for|this|output|pronunciation|language|name|ipa|phonetic|"
     r"alphabet|given|its|are|you|your|please|following|would|should|"
     r"only|slashes|brackets|explanation|characters|single|best|with|"
     r"from|that|which|not|but|have|has|will|can|about|into|after|"
-    r"before|personal|international|transcription|engine|is|of|to|"
-    r"in|it|as|be|an|or|no|so|do|go|he|we|me|my|us|am|if|up|at|by)\b",
+    r"before|personal|international|transcription|engine)\b",
+    re.IGNORECASE,
+)
+# The two-letter words from that same list, split out because each is also
+# plausible complete IPA for a short name -- "no", "me", "it". Every IPA
+# symbol is a \w character (even ˈ and ː), so \b fires only at the string
+# ends, which means one of these matching is not evidence of prose. Two
+# distinct ones, or one alongside prose structure (a space), is.
+_AMBIGUOUS_RE = re.compile(
+    r"\b(no|so|do|go|he|we|me|my|us|am|if|up|at|by|is|of|to|"
+    r"in|it|as|be|an|or)\b",
     re.IGNORECASE,
 )
 
 _MAX_IPA_LEN = 80  # implausibly long for a single name's IPA
 
-def _strip_leaked_graphemes(text: str) -> str:
-    """Remove source-spelling letters that leak into Gemma's IPA.
+# Precomposed spelling letters that leak into the model's IPA, mapped to the
+# phoneme each denotes. Every target is verified present in Kokoro's
+# vocabulary, so none of them is silently dropped at synthesis.
+#
+# Deliberately not mapped: Polish ś/ć/ż only make sense as a set with ź -> ʑ,
+# and ʑ is NOT in Kokoro's vocabulary, so mapping three of the four would
+# leave an inconsistent gap. The vowel umlauts (ü ö å) have language-dependent
+# values, and folding them to their base vowel is already a fair approximation.
+_GRAPHEME_MAP = {
+    "ł": "w",  "Ł": "w",     # Polish l-stroke
+    "ñ": "ɲ",  "Ñ": "ɲ",     # Spanish/Galician/Basque palatal nasal
+    "š": "ʃ",  "Š": "ʃ",     # Czech/Slovak/Croatian/Baltic/Finnish
+    "ž": "ʒ",  "Ž": "ʒ",
+    "č": "tʃ", "Č": "tʃ",
+}
 
-    Gemma sometimes emits a raw grapheme instead of a phoneme — Polish `ł`,
-    an acute-accented `á` — which Kokoro can't parse and mangles. Map the
-    precomposed offenders to their nearest phoneme, then strip combining
-    diacritics (spelling accents, nasal tildes, tie bars) Kokoro's English
-    voice can't render. Real IPA symbols (ʃ ʒ ɔ ɐ ʐ …) are single codepoints
-    with no combining marks, so they pass through untouched.
+
+def _strip_leaked_graphemes(text: str) -> str:
+    """Map source-spelling letters that leak into the model's IPA.
+
+    Gemma sometimes emits a raw grapheme instead of a phoneme. Each one in
+    ``_GRAPHEME_MAP`` becomes the phoneme it denotes; everything else is left
+    exactly as it is.
+
+    This used to NFD-decompose and drop every combining mark, justified by
+    "Real IPA symbols are single codepoints with no combining marks, so they
+    pass through untouched". Kokoro's published vocabulary settles that: `ç`
+    (U+00E7) decomposed to `c` + cedilla and shipped as a bare `c`, a
+    different phoneme, and nasalised vowels lost their tilde -- yet `ç` and
+    U+0303 are both symbols Kokoro accepts. Folding to what Kokoro can
+    actually voice now happens at the TTS boundary, where that knowledge
+    belongs.
     """
-    import unicodedata
-    text = text.replace("ł", "w").replace("Ł", "w")   # Polish ł = /w/
-    decomposed = unicodedata.normalize("NFD", text)
-    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    for grapheme, phoneme in _GRAPHEME_MAP.items():
+        text = text.replace(grapheme, phoneme)
+    return text
 
 def _sanitize_ipa(raw: str, name: str | None = None) -> str | None:
     """Clean model output to bare IPA, or ``None`` if implausible.
@@ -169,16 +203,21 @@ def _sanitize_ipa(raw: str, name: str | None = None) -> str | None:
             "(text=%r)", name, m.group(0), text,
         )
         return None
-    # Embedded common English words -> prose contamination.
+    # An unambiguous prose word -> contamination. One match is enough.
     m = _PROSE_RE.search(text)
     if m:
-        # Naming the matched word is what exposes the false positives: every
-        # IPA symbol is a \w character (even ˈ and ː), so \b fires only at the
-        # string ends. "ˈmeɪ" passes, but bare all-ASCII IPA -- "no", "me",
-        # "it" -- is rejected outright.
         log.warning(
             "Gemma IPA rejected for name=%r: prose word %r matched (text=%r)",
             name, m.group(0), text,
+        )
+        return None
+    # Two-letter words prove nothing on their own -- each is plausible short
+    # IPA. Two distinct ones, or one plus prose structure, does.
+    ambiguous = {w.lower() for w in _AMBIGUOUS_RE.findall(text)}
+    if len(ambiguous) >= 2 or (ambiguous and " " in text):
+        log.warning(
+            "Gemma IPA rejected for name=%r: reads as prose, short words %s "
+            "(text=%r)", name, sorted(ambiguous), text,
         )
         return None
 

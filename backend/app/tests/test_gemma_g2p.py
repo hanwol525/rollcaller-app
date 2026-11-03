@@ -131,6 +131,49 @@ class TestSanitizerStripsContamination:
         assert _sanitize_ipa(raw) is None
 
 
+class TestSanitizerPreservesLegitimateIPA:
+    """The sanitizer must not destroy or reject real IPA.
+
+    Both failures were §7-verified in AUDIT.md and had no coverage at all:
+    nothing in the repo asserted anything about `ç`, nasal marks, the
+    syllable separator, or short all-ASCII IPA.
+    """
+
+    def test_c_cedilla_survives(self):
+        """`ç` is a legitimate IPA symbol and one Kokoro accepts. It used to
+        be NFD-decomposed and shipped as a bare `c` -- a different phoneme."""
+        assert _sanitize_ipa("ɪç") == "ɪç"
+
+    def test_nasal_marks_survive(self):
+        """U+0303 is the only combining mark in Kokoro's vocabulary, so
+        stripping it destroyed a phoneme the voice can say. João's name."""
+        assert _sanitize_ipa("ˈdʒoːɐ̃w̃") == "ˈdʒoːɐ̃w̃"
+
+    def test_syllable_separator_survives(self):
+        """The ASCII period is the IPA syllable separator, and U+002E is in
+        Kokoro's vocabulary -- it is not sentence punctuation."""
+        assert _sanitize_ipa("ˈmɑːkɪs.ˈdʒuːniə") == "ˈmɑːkɪs.ˈdʒuːniə"
+
+    def test_short_ascii_ipa_is_accepted(self):
+        """Bare `no`, `me`, `it` are plausible complete IPA for short names,
+        and were rejected outright by the old stopword membership test."""
+        for text in ("no", "me", "it"):
+            assert _sanitize_ipa(text, name="short") == text
+
+    def test_multi_word_ipa_is_accepted(self):
+        """A space counts as prose structure only alongside a short stopword;
+        a real two-word name must still pass."""
+        assert _sanitize_ipa("hˈænə wˈʊlfsən") == "hˈænə wˈʊlfsən"
+
+    def test_leaked_graphemes_map_to_their_phoneme(self):
+        """Every mapping targets a symbol verified present in Kokoro's
+        vocabulary, so none of them is silently dropped at synthesis."""
+        assert _sanitize_ipa("ɲ") == "ɲ"              # already a phoneme
+        assert _sanitize_ipa("ñ") == "ɲ"              # Spanish grapheme -> phoneme
+        assert _sanitize_ipa("łukasz") == "wukasz"
+        assert _sanitize_ipa("šžč") == "ʃʒtʃ"
+
+
 class TestG2pFallsBackWhenGemmaUnavailable:
     """With Gemma env unset, the g2p path still yields IPA via eSpeak and the
     source is still ``IpaSource.g2p``."""
@@ -533,23 +576,30 @@ class TestSwallowSitesAreNotSilent:
         assert "'Siobhan'" in msgs[0]
 
     def test_prose_rejection_names_the_matched_word(self, caplog):
-        """Naming the match is what evidences the false positive.
+        """Naming the match is what evidences a rejection.
 
         Measured: every IPA symbol is a ``\\w`` character, including the
         stress mark and the length mark, so ``\\b`` fires only at the string
-        ends. "ˈmeɪ" therefore passes; it is bare all-ASCII IPA that is
-        wrongly rejected, exactly as the brief states.
-
-        ⚠️ Unit 5 inverts the ``is None`` half of this -- short ASCII IPA
-        must survive. Keep the log assertion when you do.
+        ends -- which is why bare all-ASCII IPA was rejected while "ˈmeɪ"
+        passed. Short IPA survives now (see TestSanitizerPreservesLegitimateIPA);
+        this keeps the log assertion on an input that is still, correctly, prose.
         """
         caplog.set_level(logging.WARNING)
-        assert _sanitize_ipa("ˈmeɪ", name="May") == "ˈmeɪ"   # passes today, correctly
-        assert _sanitize_ipa("me", name="Mei") is None       # rejected today, wrongly
+        assert _sanitize_ipa("the pronunciation is ʃɪˈvɔːn", name="Siobhan") is None
         msgs = _messages(caplog, "gemma")
         assert len(msgs) == 1
-        assert "prose word 'me'" in msgs[0]
-        assert "'Mei'" in msgs[0]
+        assert "prose word 'the'" in msgs[0]
+        assert "'Siobhan'" in msgs[0]
+
+    def test_ambiguous_short_words_rejection_names_them(self, caplog):
+        """The second tier is a live guard, not dead code: all-short-word
+        prose has no unambiguous word for the first tier to catch."""
+        caplog.set_level(logging.WARNING)
+        assert _sanitize_ipa("is of", name="Bob") is None
+        msgs = _messages(caplog, "gemma")
+        assert len(msgs) == 1
+        assert "reads as prose" in msgs[0]
+        assert "'is'" in msgs[0] and "'of'" in msgs[0]
 
     # --- the structural guard ---------------------------------------------
 
