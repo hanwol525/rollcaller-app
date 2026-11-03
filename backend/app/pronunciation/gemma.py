@@ -11,9 +11,18 @@ Config is environment-only (``GEMMA_BASE_URL`` / ``GEMMA_MODEL`` /
 """
 from __future__ import annotations
 
+import logging
 import re
 
 from app.config import settings
+
+log = logging.getLogger(__name__)
+
+# Set once each condition has been reported. Both are process-lifetime facts,
+# identical on every call, and g2p runs once per participant in a batch
+# render, so reporting per call would be N copies of a single line.
+_warned_unconfigured = False
+_warned_no_httpx = False
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +94,7 @@ def _strip_leaked_graphemes(text: str) -> str:
     decomposed = unicodedata.normalize("NFD", text)
     return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
 
-def _sanitize_ipa(raw: str) -> str | None:
+def _sanitize_ipa(raw: str, name: str | None = None) -> str | None:
     """Clean model output to bare IPA, or ``None`` if implausible.
 
     Steps:
@@ -101,8 +110,11 @@ def _sanitize_ipa(raw: str) -> str | None:
     Does **not** delete ASCII letters -- half the IPA inventory is ASCII
     (p t k m n s f b d g l w j h z v r). The guard is prompt discipline +
     wrapper stripping + the plausibility check, not character-class deletion.
+
+    ``name`` labels the log lines only; it does not affect the result.
     """
     if not raw:
+        log.warning("Gemma IPA rejected for name=%r: empty model output", name)
         return None
 
     text = raw
@@ -138,14 +150,36 @@ def _sanitize_ipa(raw: str) -> str | None:
 
     # 6. Plausibility check -> reject to None.
     if not text:
+        log.warning(
+            "Gemma IPA rejected for name=%r: nothing left after cleaning "
+            "(raw=%.120r)", name, raw,
+        )
         return None
     if len(text) > _MAX_IPA_LEN:
+        log.warning(
+            "Gemma IPA rejected for name=%r: %d chars exceeds the %d-char "
+            "ceiling (text=%.120r)", name, len(text), _MAX_IPA_LEN, text,
+        )
         return None
     # ASCII sentence punctuation anywhere -> prose contamination.
-    if _PUNCT_RE.search(text):
+    m = _PUNCT_RE.search(text)
+    if m:
+        log.warning(
+            "Gemma IPA rejected for name=%r: ASCII sentence punctuation %r "
+            "(text=%r)", name, m.group(0), text,
+        )
         return None
     # Embedded common English words -> prose contamination.
-    if _PROSE_RE.search(text):
+    m = _PROSE_RE.search(text)
+    if m:
+        # Naming the matched word is what exposes the false positives: every
+        # IPA symbol is a \w character (even ˈ and ː), so \b fires only at the
+        # string ends. "ˈmeɪ" passes, but bare all-ASCII IPA -- "no", "me",
+        # "it" -- is rejected outright.
+        log.warning(
+            "Gemma IPA rejected for name=%r: prose word %r matched (text=%r)",
+            name, m.group(0), text,
+        )
         return None
 
     return text
@@ -161,11 +195,26 @@ def gemma_ipa(name: str) -> str | None:
     on missing config, not on network error, not on timeout, not on empty or
     implausible output.
     """
+    global _warned_unconfigured, _warned_no_httpx
+
     base_url = settings.gemma_base_url
     model = settings.gemma_model
     api_key = settings.gemma_api_key
     # If any of the three is unset -> None immediately (-> eSpeak floor).
     if not base_url or not model or not api_key:
+        if not _warned_unconfigured:
+            _warned_unconfigured = True
+            unset = [
+                env for env, value in (
+                    ("GEMMA_BASE_URL", base_url),
+                    ("GEMMA_MODEL", model),
+                    ("GEMMA_API_KEY", api_key),
+                ) if not value
+            ]
+            log.warning(
+                "Gemma not configured (unset: %s) — using the eSpeak floor",
+                ", ".join(unset),
+            )
         return None
 
     url = base_url.rstrip("/") + "/chat/completions"
@@ -193,24 +242,43 @@ def gemma_ipa(name: str) -> str | None:
     try:
         import httpx
     except ImportError:
-      return None
+        if not _warned_no_httpx:
+            _warned_no_httpx = True
+            log.warning("httpx not installed — using the eSpeak floor")
+        return None
 
     try:
         with httpx.Client(timeout=30.0) as client:
             resp = client.post(url, json=payload, headers=headers)
         if resp.status_code != 200:
+            # Status and url only — `headers` carries the bearer token.
+            log.warning(
+                "Gemma HTTP %s from %s — using the eSpeak floor (body=%.200r)",
+                resp.status_code, url, resp.text,
+            )
             return None
         data = resp.json()
         content = data["choices"][0]["message"]["content"]
-    except Exception:
+    except Exception as e:
         # Any failure (network, timeout, JSON parse, missing field) -> None.
+        # The type is what separates them: ReadTimeout, ConnectError,
+        # JSONDecodeError and KeyError are four different operational faults.
+        log.warning(
+            "Gemma request failed (%s: %s) — using the eSpeak floor",
+            type(e).__name__, e,
+        )
         return None
 
     if not content:
+        log.warning(
+            "Gemma returned empty content for name=%r — using the eSpeak floor",
+            name,
+        )
         return None
 
-    bare = _sanitize_ipa(content)
+    bare = _sanitize_ipa(content, name=name)
     if bare is None:
+        # No log here: _sanitize_ipa already reported the specific reason.
         return None
     # Wrap in the same /.../ bracketing convention the eSpeak path produces
     # (see _fallback / espeak_ipa), so gemma_ipa is a literal drop-in.
