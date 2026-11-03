@@ -64,7 +64,7 @@ def db_session(db_engine):
 
 
 @pytest.fixture()
-def client(db_engine):
+def client(db_engine, monkeypatch):
     """TestClient with the DB dependency overridden to use the test engine."""
     def _get_test_session():
         with Session(db_engine) as s:
@@ -78,20 +78,32 @@ def client(db_engine):
         from app.auth import seed_organizer
         seed_organizer(s)
 
+    # The lifespan calls orchestrator.warm_all() now. Left alone that would
+    # build a real EspeakBackend (~2.3 s) for every test using this fixture,
+    # and download ~1.6 GB wherever kokoro and transformers are installed --
+    # the cost that test_warm_all_does_not_raise is marked integration to
+    # avoid. test_lifespan_warms_all_four_stages builds its own TestClient to
+    # prove the wiring really fires.
+    from app.pronunciation import orchestrator
+    monkeypatch.setattr(orchestrator, "warm_all", lambda: None)
+
     with TestClient(app) as c:
         # Reset pronunciation module state so each test starts from the
-        # unwarmed condition. Note the lifespan does NOT call warm_all() —
-        # main.py only runs init_db() and seed_organizer() — so nothing has
-        # loaded these; the reset guards against leakage between tests that
-        # trigger the lazy warm (tts.py:70, recognize.py:32).
+        # unwarmed condition. The lifespan does call warm_all() now, but the
+        # monkeypatch above neuters it for this fixture, so nothing has been
+        # loaded; the reset guards against leakage between tests that trigger
+        # a lazy warm (g2p.py, tts.py:70, recognize.py:32).
         #
         # These are the real module globals. Two of them were previously
         # misnamed (`recognize._recognizer`, `tts._tts`), which silently
-        # created new unused attributes and reset nothing.
-        from app.pronunciation import g2p, recognize, tts
-        g2p._backend = None
+        # created new unused attributes and reset nothing — and g2p's two are
+        # containers mutated in place, so they are cleared, not reassigned.
+        from app.pronunciation import g2p, recognize, transcode, tts
+        g2p._backends.clear()
+        g2p._warned_warm_failed.clear()
         recognize._processor = None
         recognize._model = None
+        transcode._ffmpeg_path = None
         tts._pipeline = None
         yield c
 

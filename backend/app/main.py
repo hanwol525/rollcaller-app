@@ -1,6 +1,7 @@
 """FastAPI app entry point.
 
-- Loads Kokoro + Allosaurus once at startup via lifespan (warm instances).
+- Warms the four pronunciation stages once at startup via lifespan: eSpeak
+  g2p, the wav2vec2 recognizer, Kokoro TTS and the ffmpeg path.
 - Seeds the single organizer at startup.
 - Registers all routers.
 - Serves /media/{key} in dev (filesystem); MinIO serves directly in prod.
@@ -15,13 +16,13 @@ from sqlmodel import Session
 
 from app.auth import seed_organizer
 from app.db import engine, init_db
+from app.pronunciation import orchestrator
 from app.routers import auth as auth_router
 from app.routers import ceremony as ceremony_router
 from app.routers import invite as invite_router
 from app.routers import participants as participants_router
 from app.routers import spaces as spaces_router
 from app.storage import storage
-from app.config import settings
 
 
 @asynccontextmanager
@@ -32,6 +33,10 @@ async def lifespan(app: FastAPI):
     # 2. Seed the single organizer
     with Session(engine) as db:
         seed_organizer(db)
+    # 3. Warm the pronunciation stages once. Every stage degrades on failure
+    #    and now logs why, so a missing model never blocks startup. Called
+    #    through the module attribute so tests can neuter it.
+    orchestrator.warm_all()
     yield
     # --- Shutdown ---
     # (nothing to clean up synchronously)

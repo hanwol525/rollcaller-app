@@ -1,10 +1,11 @@
 """Orchestrates the pronunciation pipeline.
 
 Responsibilities:
-  - warm_all(): load Kokoro + Allosaurus once at startup (via FastAPI lifespan).
-  - recognize_recording(wav_bytes) -> ipa: audio -> IPA via Allosaurus.
+  - warm_all(): load the four stages once at startup (via the FastAPI
+    lifespan) — eSpeak g2p, the wav2vec2 recognizer, Kokoro TTS, ffmpeg.
+  - recognize_recording(wav_bytes) -> ipa: audio -> IPA via wav2vec2.
   - render_clip(name, ipa_text) -> wav_bytes: IPA -> audio via Kokoro TTS.
-  - g2p(name) -> ipa: grapheme -> IPA (delegates to g2p module).
+  - g2p_name(name) -> ipa: grapheme -> IPA (delegates to the g2p module).
 
 TTS fallback inside the batch renderer looks like:
     ipa = participant.ipa_text or g2p(participant.name)

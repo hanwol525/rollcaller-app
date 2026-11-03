@@ -143,7 +143,12 @@ class TestStorageFilesystem:
 
 
 class TestPronunciationFallbacks:
-    """Test that the fallback paths work without ML deps installed."""
+    """Test the g2p / recognize / TTS paths without the ML stack installed.
+
+    Since the eSpeak floor was fixed, the g2p tests here exercise the real
+    phonemizer backend rather than the placeholder, so they assert the
+    contract (a non-empty str) and never the engine or the format.
+    """
 
     def test_g2p_fallback_returns_non_empty(self):
         from app.pronunciation.g2p import g2p
@@ -208,6 +213,32 @@ class TestPronunciationFallbacks:
         """
         from app.pronunciation.orchestrator import warm_all
         warm_all()  # should complete without error
+
+    def test_lifespan_warms_all_four_stages(self, monkeypatch):
+        """The lifespan must call warm_all() — the only automated proof.
+
+        Unmarked on purpose: it stubs every stage's warm() so nothing heavy
+        loads, which lets it run on a kokoro-less machine. Its sibling
+        test_warm_all_does_not_raise is @integration and so runs nowhere.
+
+        Builds its own TestClient rather than taking the `client` fixture,
+        because that fixture neuters warm_all to keep the suite fast.
+        """
+        from fastapi.testclient import TestClient
+        from app.main import app
+        from app.pronunciation import g2p, recognize, transcode, tts
+
+        called = []
+        # g2p.warm takes a language now, hence *a/**k.
+        monkeypatch.setattr(g2p, "warm", lambda *a, **k: called.append("g2p"))
+        monkeypatch.setattr(recognize, "warm", lambda: called.append("recognize"))
+        monkeypatch.setattr(tts, "warm", lambda: called.append("tts"))
+        monkeypatch.setattr(transcode, "warm", lambda: called.append("transcode"))
+
+        with TestClient(app):
+            pass
+
+        assert sorted(called) == ["g2p", "recognize", "transcode", "tts"]
 
 
 class TestMediaEndpoint:

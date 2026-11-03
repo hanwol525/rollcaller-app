@@ -36,7 +36,7 @@ def _configure_gemma(monkeypatch, api_key="key-test"):
 
 
 def _fake_phonemizer(monkeypatch, exc):
-    """Install a phonemizer whose Backend lookup raises ``exc``.
+    """Install a phonemizer whose EspeakBackend construction raises ``exc``.
 
     Deliberately hermetic: asserting on the exception the *real* import
     produces would make the test depend on whether phonemizer is installed,
@@ -48,7 +48,7 @@ def _fake_phonemizer(monkeypatch, exc):
     def _raise(*args, **kwargs):
         raise exc
 
-    backend_mod.Backend = _raise
+    backend_mod.EspeakBackend = _raise
     pkg = types.ModuleType("phonemizer")
     pkg.backend = backend_mod
     monkeypatch.setitem(sys.modules, "phonemizer", pkg)
@@ -155,9 +155,19 @@ class TestG2pFallsBackWhenGemmaUnavailable:
         assert isinstance(result, str)
         assert len(result) > 0
 
+    @pytest.mark.xfail(
+        reason="Unit 4 settles the slash convention: espeak_ipa returns bare "
+               "IPA now, while gemma_ipa still wraps",
+        strict=True,
+    )
     def test_gemma_ipa_wraps_in_espeak_format(self, monkeypatch):
         """gemma_ipa returns /.../ bracketed IPA to match the eSpeak convention,
-        so it is a literal drop-in for espeak_ipa (no new format invented)."""
+        so it is a literal drop-in for espeak_ipa (no new format invented).
+
+        ⚠️ The premise is now false: with the floor fixed, espeak_ipa returns
+        bare IPA. strict=True means Unit 4 cannot quietly forget to settle
+        this -- the moment it does, this starts failing as an unexpected pass.
+        """
         # Provide config so gemma_ipa proceeds past the env check.
         monkeypatch.setenv("GEMMA_BASE_URL", "https://example.test/v1")
         monkeypatch.setenv("GEMMA_MODEL", "gemma-test")
@@ -233,8 +243,8 @@ class TestSwallowSitesAreNotSilent:
     def test_warm_failure_names_the_exception_type(self, monkeypatch, caplog):
         """The type is the diagnosis; without it all four causes look alike."""
         caplog.set_level(logging.WARNING)
-        monkeypatch.setattr(g2p_module, "_warned_warm_failed", False)
-        monkeypatch.setattr(g2p_module, "_backend", None)
+        monkeypatch.setattr(g2p_module, "_warned_warm_failed", set())
+        monkeypatch.setattr(g2p_module, "_backends", {})
         _fake_phonemizer(monkeypatch, TypeError("unexpected keyword 'backend'"))
 
         g2p_module.warm()
@@ -243,18 +253,20 @@ class TestSwallowSitesAreNotSilent:
         assert len(msgs) == 1
         assert "eSpeak warm failed" in msgs[0]
         assert "TypeError" in msgs[0]
-        # And the swallow still swallows -- this unit changes no behaviour.
-        assert g2p_module._backend is None
+        # The failure is cached as a negative entry rather than left absent --
+        # that is what stops the self-heal repeating a ~1.6 s construction
+        # once per participant.
+        assert g2p_module._backends["en-us"] is None
 
     def test_warm_failure_is_reported_once_per_process(
         self, monkeypatch, caplog
     ):
-        """Unit 3's lazy self-heal calls warm() per use; without the dedupe
-        flag a broken backend becomes one line per participant per render."""
+        """The lazy self-heal calls warm() on first use per language; without
+        the dedupe set a broken backend would log once per participant."""
         caplog.set_level(logging.WARNING)
-        monkeypatch.setattr(g2p_module, "_warned_warm_failed", False)
-        monkeypatch.setattr(g2p_module, "_backend", None)
-        _fake_phonemizer(monkeypatch, AttributeError("no attribute 'Backend'"))
+        monkeypatch.setattr(g2p_module, "_warned_warm_failed", set())
+        monkeypatch.setattr(g2p_module, "_backends", {})
+        _fake_phonemizer(monkeypatch, RuntimeError("espeak-ng not found"))
 
         g2p_module.warm()
         g2p_module.warm()
@@ -271,7 +283,8 @@ class TestSwallowSitesAreNotSilent:
             def phonemize(self, *args, **kwargs):
                 raise RuntimeError("espeak library vanished")
 
-        monkeypatch.setattr(g2p_module, "_backend", _Boom())
+        # Seeded by membership, so the self-heal leaves it in place.
+        monkeypatch.setattr(g2p_module, "_backends", {"en-us": _Boom()})
 
         assert espeak_ipa("Bob") == "/bob/"
 
@@ -285,14 +298,23 @@ class TestSwallowSitesAreNotSilent:
         """The placeholder reaching a real ceremony is the one line that must
         be per-name, not deduped -- which names it hit is the whole point."""
         caplog.set_level(logging.WARNING)
-        monkeypatch.setattr(g2p_module, "_backend", None)
+        # Force a genuine warm failure instead of relying on espeak being
+        # absent: with the floor fixed, a real backend phonemizes this name
+        # successfully and no placeholder is ever produced.
+        monkeypatch.setattr(g2p_module, "_warned_warm_failed", set())
+        monkeypatch.setattr(g2p_module, "_backends", {})
+        _fake_phonemizer(monkeypatch, RuntimeError("espeak-ng not found"))
 
         assert espeak_ipa("Hannah Wolfson") == "/hannah_wolfson/"
 
+        # Two records now: the warm failure, then the placeholder.
         msgs = _messages(caplog, "g2p")
-        assert len(msgs) == 1
-        assert "'Hannah Wolfson'" in msgs[0]
-        assert "/hannah_wolfson/" in msgs[0]
+        assert any(
+            "placeholder IPA used" in m
+            and "'Hannah Wolfson'" in m
+            and "/hannah_wolfson/" in m
+            for m in msgs
+        ), msgs
 
     # --- gemma.py: gemma_ipa ---------------------------------------------
 

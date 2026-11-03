@@ -16,43 +16,56 @@ from app.pronunciation.gemma import gemma_ipa
 
 log = logging.getLogger(__name__)
 
+DEFAULT_LANGUAGE = "en-us"
+
 # ---------------------------------------------------------------------------
-# Warm instance (loaded once at startup by the orchestrator)
+# Per-language backend cache (warmed at startup by the orchestrator, and
+# lazily on first use)
 # ---------------------------------------------------------------------------
-_backend = None  # type: ignore[var-annotated]
+# An EspeakBackend instance is bound to one language, so a single global
+# cannot serve several. Keyed by espeak language code.
+#
+# Membership means warm() has been attempted; a None value means it was
+# attempted and failed. That negative entry deliberately diverges from
+# tts.py:69 and recognize.py:32, which re-call warm() on every use:
+# constructing a backend costs ~2.3 s — ~1.6 s even when it fails — and g2p
+# runs once per participant, so retrying would cost minutes per render.
+_backends: dict[str, object | None] = {}
 
-# Set once the warm failure has been reported. A lazy self-heal calls warm()
-# on every use, and g2p runs once per participant in a batch render, so
-# reporting per call would be one copy of the same line per name.
-_warned_warm_failed = False
+# Language codes whose warm failure has been reported, so a batch render
+# produces one line rather than one per participant.
+_warned_warm_failed: set[str] = set()
 
 
-def warm() -> None:
-    """Pre-load the phonemizer backend. Called once at app startup.
+def warm(language: str = DEFAULT_LANGUAGE) -> None:
+    """Pre-load the phonemizer backend for one language.
 
-    Gemma is a stateless HTTP call, so there is nothing to warm for it.
+    Called at startup via ``orchestrator.warm_all()`` and lazily by
+    ``espeak_ipa`` on first use. Gemma is a stateless HTTP call, so there is
+    nothing to warm for it.
+
+    Both module containers are mutated in place rather than rebound, so no
+    ``global`` is needed — and so a reset must ``.clear()`` them.
     """
-    global _backend, _warned_warm_failed
     try:
-        from phonemizer import backend as _b
-        _backend = _b.Backend(
-            language="en-us",
-            backend="espeak",
+        from phonemizer.backend import EspeakBackend
+        _backends[language] = EspeakBackend(
+            language=language,
             with_stress=True,
         )
     except Exception as e:
-        # espeak-ng / phonemizer not installed — fallback will be used.
-        _backend = None
-        if not _warned_warm_failed:
-            _warned_warm_failed = True
-            # The exception *type* is the whole diagnosis, and all of these
-            # currently look identical downstream: ModuleNotFoundError means
-            # phonemizer is absent, AttributeError means the symbol above is
-            # wrong, TypeError means a bad kwarg, RuntimeError means espeak-ng
-            # itself could not be found.
+        # phonemizer absent, espeak-ng not loadable, or an unsupported
+        # language — the placeholder will be used for this language.
+        _backends[language] = None
+        if language not in _warned_warm_failed:
+            _warned_warm_failed.add(language)
+            # The exception type is the whole diagnosis: ModuleNotFoundError
+            # means phonemizer is absent, RuntimeError means espeak-ng could
+            # not be loaded or the language is not supported.
             log.warning(
-                "eSpeak warm failed (%s: %s) — g2p will return placeholder IPA",
-                type(e).__name__, e, exc_info=True,
+                "eSpeak warm failed for language=%r (%s: %s) — g2p will "
+                "return placeholder IPA", language, type(e).__name__, e,
+                exc_info=True,
             )
 
 
@@ -68,22 +81,32 @@ def g2p(text: str) -> str:
     return gemma_ipa(text) or espeak_ipa(text)
 
 
-def espeak_ipa(text: str) -> str:
+def espeak_ipa(text: str, language: str = DEFAULT_LANGUAGE) -> str:
     """eSpeak NG grapheme-to-phoneme — the fallback floor.
 
-    Produces IPA in the same bracketing/spacing convention the pipeline has
-    always used, so ``gemma_ipa`` is a literal drop-in for this function.
+    Returns **bare** IPA on the working path. Slashes are TTS markup and are
+    added at the Kokoro boundary (``tts.py``); ``_fallback`` still wraps, a
+    split Unit 4 settles.
     """
-    if _backend is not None:
+    if language not in _backends:
+        warm(language)                 # lazy self-heal on first use
+    backend = _backends.get(language)
+    if backend is not None:
         try:
-            result = _backend.phonemize([text], strip=True)
-            if isinstance(result, list):
-                return result[0].strip()
-            return str(result).strip()
+            result = backend.phonemize([text], strip=True)
+            ipa = (result[0] if isinstance(result, list) else str(result)).strip()
+            if ipa:
+                return ipa
+            # A blank name phonemizes to "", which would make g2p() return a
+            # falsy string and break its non-empty contract.
+            log.warning(
+                "eSpeak returned empty IPA for name=%r language=%r",
+                text, language,
+            )
         except Exception as e:
             log.warning(
-                "eSpeak phonemize failed for name=%r (%s: %s)",
-                text, type(e).__name__, e,
+                "eSpeak phonemize failed for name=%r language=%r (%s: %s)",
+                text, language, type(e).__name__, e,
             )
     # Fallback: very rough ASCII approximation so the pipeline still works
     # in environments without espeak-ng (e.g. CI / test).
