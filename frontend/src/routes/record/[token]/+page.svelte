@@ -22,6 +22,11 @@ let micError = $state('');
 	let previewLoading = $state(false);
 	let previewUrl = $state<string | null>(null);
 	let confirming = $state(false);
+// Kept apart from `error` on purpose. `error` replaces the whole screen with
+// a card that has no way back, which is right for a dead invite link and
+// wrong for a refused pronunciation — the participant needs Re-record to
+// still be there.
+let confirmError = $state('');
 let ipaText: string | null = null; // the hidden IPA baton
 
 // Re-record override: when true, show the recorder regardless of status
@@ -113,11 +118,15 @@ previewLoading = false;
 
 async function handleConfirm() {
 if (!ipaText) return;
+confirmError = '';
 confirming = true;
 try {
 self = await confirmIpa(token, ipaText, false);
 } catch (e) {
-error = String(e).replace('Error: ', '');
+// In place, never the full-screen `error`. The backend refuses a
+// pronunciation the ceremony voice cannot use (422), and the one thing
+// the participant can do about it is record again.
+confirmError = String(e).replace('Error: ', '');
 } finally {
 confirming = false;
 }
@@ -128,6 +137,7 @@ if (previewUrl) { URL.revokeObjectURL(previewUrl); }
 previewUrl = null;
 reRecording = true;
 micError = '';
+confirmError = '';
 }
 </script>
 
@@ -191,6 +201,10 @@ This is the pronunciation you entered yourself. Your recording has been saved.
 </div>
 
 <p class="hint">This is the AI ceremony voice rendering your pronunciation — not your own recording.</p>
+
+{#if confirmError}
+<p class="error-msg">{confirmError}</p>
+{/if}
 
 <div class="actions">
 <button onclick={handleConfirm} disabled={confirming} class="btn-primary">

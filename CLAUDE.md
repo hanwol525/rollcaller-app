@@ -129,9 +129,20 @@ façade. Every stage defines a `warm()`, all four self-heal on first use, and
 never synthesizes. Robotic output means Kokoro is voicing bad IPA, never that eSpeak synthesized
 something.
 
-**Bare IPA is the storage format.** Every producer (`gemma_ipa`, `espeak_ipa`, `g2p._fallback`)
-returns IPA with no `/slashes/`. Slashes are Kokoro markup and are added only at the TTS boundary,
-by `tts.py`. The `.strip("/[]")` there is defensive, not load-bearing.
+**Bare IPA is the storage format — by convention, not by enforcement.** Every *producer*
+(`gemma_ipa`, `espeak_ipa`, `g2p._fallback`) returns IPA with no `/slashes/`, and slashes are Kokoro
+markup added only at the TTS boundary. But `IPAConfirmRequest.ipa` is an unvalidated `str` stored
+verbatim, so a participant confirming `/ˈælɪs/` in ordinary dictionary notation puts wrappers
+straight into the row.
+
+⚠️ So the strip is **load-bearing, and shared** — not "defensive", which this file used to claim.
+It lives in `tts.prepare_ipa()` (`_strip_wrappers` then `_normalise_for_kokoro`), which is pure and
+idempotent, and `tts._reject_reason` runs it on its own input. That is what makes
+`orchestrator.ipa_refusal` and the TTS boundary judge the **same string**: they used to differ, so a
+slash-wrapped script narration passed the renderer's check, reached `synthesize`, was refused
+*there*, and silently degraded to a clip voiced from the spelling — counted in `rendered` with no
+`failures` entry. Enforcing bare IPA on write is still open, and would make the strip redundant
+rather than load-bearing.
 
 ✅ **Fixed in Brief 03 — the eSpeak floor works.** It used to return placeholder pseudo-IPA:
 `warm()` called `phonemizer.backend.Backend`, a symbol phonemizer does not export, the
@@ -200,6 +211,15 @@ Preview (`/ipa/preview`) returns raw WAV bytes and **deliberately does not persi
 product rule, but its only test (`test_preview_does_not_store`) is `@integration`, so since the
 CI gate was deleted it runs nowhere automatically (see Gotchas).
 
+`POST /invite/{token}/ipa/confirm` **refuses unusable IPA with a 422 and writes nothing**, checked
+before the first assignment so the row is never partially written. Confirming is a promise that the
+pronunciation reaches the ceremony; without the check, `synthesize` accepted it, cleared the
+override and voiced the *spelling*, so the participant was told they were confirmed, got a clip,
+and only the organizer found out — at Prep Clips, where the renderer refused the very IPA this
+route had just accepted. The participant-facing side of that 422 matters: `confirmIpa` unwraps
+FastAPI's `detail` and the record page renders it **in place**, because the full-screen `error`
+card has no buttons and recording again is the one thing that would help.
+
 `POST /spaces/{id}/render` ("Prep Clips") batch-renders the roster on a `ThreadPoolExecutor` and
 **returns a partial-success report** — `{rendered, failures: [{name, reason}]}` — because one
 unrenderable name must not discard everyone else's clips. The ordering is load-bearing:
@@ -208,6 +228,24 @@ instances), every write and the single commit happen on the request thread, and 
 is deleted **only after that commit**. So the worst a failure can do is leak a blob; it can never
 leave a row pointing at a deleted file. This is the only endpoint in the codebase that reports
 per-item failure — there is no other partial-success convention to match.
+
+**Two classes of blob are orphaned, and they share that one post-commit loop.** A clip superseded by
+a fresh render, and a clip **withdrawn** from a participant the guard refused. The second matters
+because the clip a refused participant holds came from `confirm_ipa`, where `synthesize` degrades
+rather than refuses — so it is a reading of their *spelling*, which `GET /ceremony` went on serving
+while the render report said they had no pronunciation. Clearing it is strictly safer than a
+supersede: the row stops referencing the key before the commit, so even a failed delete leaves no
+dangling reference. **Deleting it inline would break the guarantee** — there is no new key to roll
+back, so it looks harmless, but a commit failure would then roll `clip_key` back to a blob already
+gone. `test_superseded_clips_are_deleted_only_after_the_commit` covers both classes for that reason.
+
+⚠️ **A refusal and a raise are deliberately treated differently.** A refusal is a deterministic
+judgement that will repeat, so the stale clip is actively wrong and goes. A raise is an unknown and
+usually transient — a Kokoro OOM under four workers — and silence at a ceremony is worse than a clip
+that worked on the last run, so a raise keeps its clip. Phase 2 sees both as an absent `outcomes`
+entry, so phase 1 carries the distinction forward in a `refused` set. Provenance is untouched either
+way, so one more Prep Clips is a full recovery. Deleting on both would be the obvious
+simplification; `test_a_render_that_raises_keeps_the_clip_it_already_had` is there to stop it.
 
 ⚠️ **Worker purity is not the whole thread-safety story.** It covers the ORM, which is what it was
 written for. What it never covered is a C library with global buffers underneath a pure Python
@@ -241,6 +279,25 @@ at startup instead of silently falling through to the filesystem.
 SvelteKit 2 / Svelte 5 runes / TS strict. Two API clients split by trust boundary:
 `$lib/server` (`serverFetch`, cookie-forwarding, used by every `+page.server.ts`) and `$lib/api`
 (browser-side, used by the record page and logout).
+
+**`clip_blocked_reason` is computed on every read, never stored** — on both `ParticipantRead` and
+`CeremonyItem`, via `participants._to_read` and `ceremony.get_ceremony`, both calling the same
+`orchestrator.ipa_refusal` the renderer calls. A column would go stale the moment a participant
+re-records, could drift from the renderer's own judgement, and would need an `ALTER TABLE` that
+`db.py`'s bare `create_all` will not do. It **under-reports on purpose**: it never runs g2p, so a
+participant with no stored IPA reads as merely unprepared even if the render would refuse what g2p
+gives them — deriving that per row would be an espeak call per name per page load, now serialised
+behind `g2p._espeak_lock`. A render that *raised* has no row-local signature either. Under-reporting
+is the right direction: the field never claims someone is blocked when they are not.
+
+It exists because the render report lives in `form`, which is `null` after any reload and after all
+five redirecting actions — so the roster's **Clip column is the only durable signal**, and it used
+to collapse "refused" and "never prepped" into one `None`. It now has four states: **Ready** /
+**Needs attention** (with the reason in `title`) / **Not prepared** (a pronunciation waiting on a
+render) / **None**. The ceremony page splits the same way: `notPrepped` for a roster nobody has
+prepped, and `nothingUsable` when every clip is missing *and* something was refused — which must
+not tell the organizer to press the button that just finished. That second state only became
+reachable once the renderer started refusing names outright.
 
 ⚠️ **The Vite dev proxy is load-bearing.** Browser-side calls use *relative* paths (`/auth`,
 `/invite/...`, `/media/...`), there are zero `+server.ts` routes, and the backend has no CORS
@@ -280,10 +337,15 @@ former GKE setup did this at the nginx ingress. A bare adapter-node deploy with 
   letter *names*, or whose token ends in eSpeak's word for "letter" (how it narrates a script it
   cannot read: 李雷 → `tʃˈaɪniːzlˌɛɾɚ tʃˈaɪniːzlˌɛɾɚ`, "Chinese letter" twice). On a hit it logs
   and clears the override, so Kokoro voices the plain name via its own G2P. It deliberately does
-  **not** raise — degrading is right for a participant previewing their own recording, and the
-  batch renderer applies the stricter policy itself via `orchestrator.ipa_refusal`, refusing the
-  participant outright. (It used to be justified by `future.result()` being unguarded; that is
-  fixed, but refuse-don't-raise is still correct here.) Two non-obvious constraints:
+  **not** raise; the *routes* decide what a refusal means, via
+  `orchestrator.ipa_refusal`. **The two that make a durable promise both refuse outright:** the
+  batch render names the participant in `failures` and withdraws any clip they held, and
+  `/ipa/confirm` returns **422 and writes nothing**. **Preview still degrades** — hearing what
+  would happen is the whole point of a preview. (Refuse-don't-raise inside `tts.py` used to be
+  justified by `future.result()` being unguarded; that is fixed, but it is still correct, because
+  it is what lets each route pick its own policy.) Both route-level checks and `synthesize` judge
+  the identical string, because `_reject_reason` runs `tts.prepare_ipa` on its own input. Two
+  non-obvious constraints:
   letter-name IPA is *correct* for initials, so the run
   must exceed the name's single-character words or "J R R Tolkien" is rejected; and the "letter"
   check is token-**final**, or `Letterman` → `lˈɛɾɚmən` is rejected. The guard was built against

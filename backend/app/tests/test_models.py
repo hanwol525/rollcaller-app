@@ -350,13 +350,44 @@ class TestPronunciationFallbacks:
                    if _reject_reason(n, i) is not None]
         assert not refused, refused
 
+    def test_the_renderer_and_the_tts_boundary_judge_the_same_string(self):
+        """orchestrator.ipa_refusal is what ceremony.py calls on every render,
+        and nothing else in this suite covered it.
+
+        It used to judge the **raw stored** value while synthesize judged the
+        stripped-and-folded one, so a slash-wrapped narration passed the
+        renderer's check, reached synthesize, was refused *there*, and
+        silently degraded to a clip voiced from the spelling -- counted in
+        `rendered` with no failures entry. _reject_reason runs prepare_ipa
+        itself now, so the two cannot disagree.
+        """
+        from app.pronunciation import orchestrator, tts
+
+        # Wrapped garbage: refused now, accepted before. Remove the
+        # `ipa = prepare_ipa(ipa)` line in _reject_reason and these two fail.
+        assert orchestrator.ipa_refusal("Li", "/tʃˈaɪniːzlˌɛɾɚ/") is not None
+        assert orchestrator.ipa_refusal("Abe Ng", "[ˈeɪ bˈiː]") is not None
+
+        # Wrapped *valid* IPA is the old storage format, and real rows still
+        # hold it. Refusing these would cost every legacy participant a clip.
+        assert orchestrator.ipa_refusal("Bob", "/bˈɑːb/") is None
+        assert orchestrator.ipa_refusal("Alice", "/ˈælɪs/") is None
+
+        # Idempotent, which is what lets synthesize prepare and then call a
+        # guard that prepares again.
+        assert tts.prepare_ipa(tts.prepare_ipa("/ˈælɪs/")) == tts.prepare_ipa("/ˈælɪs/")
+
     def test_refused_ipa_still_produces_a_clip_from_the_name(
         self, monkeypatch, caplog
     ):
         """Refusing the override must not fail the render.
 
-        ceremony.py's future.result() is unguarded, so raising here would 500
-        the whole roster over one odd name. Kokoro gets the plain name.
+        Degrading rather than raising is right for the participant-facing
+        paths -- preview in particular, where hearing what would happen is the
+        whole point. The batch renderer applies the stricter policy itself via
+        orchestrator.ipa_refusal, and refuses the participant outright. (This
+        used to be justified by ceremony.py's future.result() being unguarded;
+        it is guarded now, but refuse-don't-raise is still correct here.)
         """
         import logging as _logging
         from app.pronunciation import tts

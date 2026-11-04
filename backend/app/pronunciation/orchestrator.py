@@ -50,6 +50,11 @@ def ipa_refusal(name: str, ipa: str) -> str | None:
     own recording. The batch renderer uses this to refuse the participant
     outright instead, because a confident wrong announcement at a ceremony is
     worse than a reported gap.
+
+    Both now judge the **same** string: ``_reject_reason`` runs
+    ``tts.prepare_ipa`` on its input, so this cannot disagree with what Kokoro
+    is handed. It used to — a slash-wrapped narration passed here and was
+    refused one layer down, where the refusal only degraded.
     """
     return tts._reject_reason(name, ipa)
 

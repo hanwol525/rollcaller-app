@@ -170,6 +170,10 @@ class ParticipantRead(SQLModel):
     invite_token: str
     recording_key: Optional[str]
     clip_key: Optional[str]
+    # Computed per read, never stored — see participants._to_read for why.
+    # Why Prep Clips will refuse this participant, or None. Lets the roster
+    # tell "nobody has prepped yet" from "we tried and will not voice this".
+    clip_blocked_reason: Optional[str] = None
 
 
 class ParticipantSelf(SQLModel):
@@ -205,6 +209,9 @@ class CeremonyItem(SQLModel):
     clip_url: Optional[str]
     ipa_text: Optional[str]
     ipa_source: Optional[str]
+    # As on ParticipantRead: computed, so the player can distinguish a roster
+    # nobody has prepped from one where every name was refused.
+    clip_blocked_reason: Optional[str] = None
 
 
 class CeremonyData(SQLModel):

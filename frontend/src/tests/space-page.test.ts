@@ -11,7 +11,10 @@
  *   satisfies `!== undefined`, so the original branch order would have
  *   printed "Prepared 0 clip(s)." while silently dropping the failures.
  * - the Clip column is durable where the message is not: `form` is null
- *   after any reload or any of the five redirecting actions.
+ *   after any reload or any of the five redirecting actions. That claim only
+ *   became true once the column grew enough states to carry the information
+ *   — it used to collapse "refused" and "never prepped" into one "None", so
+ *   the durable signal said nothing the transient one had said.
  */
 
 import { test, expect, describe, afterEach } from 'vitest';
@@ -36,6 +39,10 @@ function participant(overrides: Record<string, unknown> = {}) {
 		invite_token: 'tok-1',
 		recording_key: null,
 		clip_key: null,
+		// Computed server-side: why Prep Clips will refuse this name. Explicit
+		// here rather than absent, so a test that depends on it being null
+		// says so.
+		clip_blocked_reason: null,
 		...overrides
 	};
 }
@@ -103,5 +110,37 @@ describe('the roster Clip column', () => {
 	test('marks a participant whose clip is ready', () => {
 		const { getByText } = renderPage(null, [participant({ clip_key: 'abc123.wav' })]);
 		expect(getByText('Ready')).toBeInTheDocument();
+	});
+
+	test('flags a refused participant once the render message is gone', () => {
+		// `form === null` is the state after any reload and after all five
+		// redirecting actions, so the per-run warning has already vanished.
+		// This column is the only thing left that knows, which is what the
+		// file header means by durable. Before it grew a third state, this
+		// participant read "None" — indistinguishable from one nobody had
+		// prepped.
+		const { getByText, queryByText } = renderPage(null, [
+			participant({
+				clip_key: null,
+				ipa_text: 'rec044',
+				ipa_source: 'manual',
+				ipa_confirmed: true,
+				clip_blocked_reason: "contains the digit '0', which Kokoro reads aloud"
+			})
+		]);
+
+		expect(getByText('Needs attention')).toBeInTheDocument();
+		expect(queryByText('None')).not.toBeInTheDocument();
+		expect(queryByText('Ready')).not.toBeInTheDocument();
+	});
+
+	test('separates a pronunciation awaiting a render from no pronunciation', () => {
+		// Neither has a clip, and neither is refused. The difference is whether
+		// there is anything to render, and both used to read "None".
+		const { getByText } = renderPage(null, [
+			participant({ clip_key: null, ipa_text: 'bˈɑːb', ipa_source: 'g2p', ipa_confirmed: true })
+		]);
+
+		expect(getByText('Not prepared')).toBeInTheDocument();
 	});
 });

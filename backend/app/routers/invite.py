@@ -200,8 +200,25 @@ def confirm_ipa(
     Sets ipa_confirmed=True, status=confirmed, clip_key=populated.
     Any human edits to the IPA set ipa_source="manual" except if the change
     is unconfirmed (which leaves the prior source).
+
+    Refuses with 422 when the TTS guard rejects the pronunciation, leaving the
+    row untouched. Confirming is a promise that this pronunciation will be
+    used at the ceremony, and ``tts.synthesize`` would otherwise accept it,
+    clear the override and voice the *spelling* of the name instead -- so the
+    participant would be told they were confirmed, get a clip, and never learn
+    it was unusable. The batch renderer makes the same refusal. Preview
+    deliberately does not: hearing what would happen is what a preview is for.
     """
     p = _get_participant_or_404(db, token)
+
+    # Before any assignment, so a rejection leaves the Session-owned instance
+    # with nothing to roll back.
+    refusal = orchestrator.ipa_refusal(p.name, body.ipa)
+    if refusal:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"That pronunciation cannot be used: {refusal}",
+        )
 
     prior_ipa = p.ipa_text
     prior_source = p.ipa_source

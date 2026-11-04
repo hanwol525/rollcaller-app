@@ -74,6 +74,38 @@ def _normalise_for_kokoro(ipa: str) -> str:
     return "".join(out)
 
 
+def _strip_wrappers(ipa: str) -> str:
+    """Drop Kokoro's own markup from an IPA string.
+
+    Slashes and brackets are notation at the TTS boundary, not storage format
+    -- but they arrive anyway. ``IPAConfirmRequest.ipa`` is an unvalidated
+    ``str`` stored verbatim, so a participant confirming ``/ˈælɪs/`` in
+    ordinary dictionary notation puts wrappers straight into the row.
+    Enforcing bare-IPA-on-write is a later brief; this copes with what is
+    there.
+    """
+    return ipa.strip().strip("/[]").strip()
+
+
+def prepare_ipa(ipa: str) -> str:
+    """The exact string the guard judges and Kokoro voices. Pure, idempotent.
+
+    Factored out because the renderer and this module used to judge two
+    *different* strings. ``ceremony.py`` handed ``orchestrator.ipa_refusal``
+    the raw stored value, so ``[ˈeɪ bˈiː]`` and ``/tʃˈaɪniːzlˌɛɾɚ/`` passed
+    its check -- the second being the exact script narration the guard exists
+    for. ``synthesize`` then stripped the wrappers, refused the result,
+    cleared the override and voiced the plain name, while the render report
+    said ``failures: []``. ``_reject_reason`` runs this itself now, so no
+    caller can judge an unprepared string.
+
+    Measured when it landed: of the inputs checked, only wrapped garbage
+    changed verdict. Wrapped *valid* IPA -- ``/bˈɑːb/``, ``/ˈælɪs/``, the old
+    storage format -- is unaffected, so no existing row regresses.
+    """
+    return _normalise_for_kokoro(_strip_wrappers(ipa))
+
+
 def _kokoro_wav(source: str) -> bytes | None:
     """Run one Kokoro pass on `source`; return WAV bytes, or None if no audio."""
     parts = []
@@ -120,7 +152,15 @@ def _reject_reason(name: str, ipa: str) -> str | None:
 
     Returns a sentence rather than a bool so the caller can log *which* rule
     fired — the three failure modes need different fixes.
+
+    Prepares its own input, deliberately: every rule here is about what Kokoro
+    will actually voice, so judging anything other than ``prepare_ipa``'s
+    output is judging a string that will never be spoken. Doing it inside
+    rather than asking callers to means a new caller cannot get it wrong.
+    Idempotent, so a caller that already prepared loses nothing.
     """
+    ipa = prepare_ipa(ipa)
+
     found = _DIGIT_RE.search(ipa)
     if found:
         return f"contains the digit {found.group(0)!r}, which Kokoro reads aloud"
@@ -178,25 +218,26 @@ def synthesize(text: str, ipa: str | None = None) -> bytes:
 
     attempts: list[str] = []
     if ipa:
-      bare_ipa = ipa.strip().strip("/[]").strip()  # defensive: stored IPA is bare since Unit 4
-      renderable = _normalise_for_kokoro(bare_ipa)
-      if renderable != bare_ipa:
-          log.warning(
-              "IPA folded to Kokoro's vocabulary for name=%r: %r -> %r",
-              text, bare_ipa, renderable,
-          )
-      bare_ipa = renderable
-      refusal = _reject_reason(text, bare_ipa)
-      if refusal:
-          log.warning(
-              "IPA refused for name=%r: %s. Kokoro will voice the name "
-              "directly instead (ipa=%r)", text, refusal, bare_ipa,
-          )
-          bare_ipa = ""        # falls through to the plain-name attempt below
-      bare_ipa = bare_ipa.lstrip("ˈˌ")
-      bare_ipa = bare_ipa.replace(" ˈ", " ").replace(" ˌ", " ")
-      if bare_ipa:
-          attempts.append(f"[{text}](/{bare_ipa}/)")  # faithful IPA — override pronunciation
+        stripped = _strip_wrappers(ipa)
+        bare_ipa = _normalise_for_kokoro(stripped)
+        if bare_ipa != stripped:
+            # Conditional on purpose: a clean IPA must log nothing, which
+            # test_synthesize_logs_when_ipa_is_folded asserts directly.
+            log.warning(
+                "IPA folded to Kokoro's vocabulary for name=%r: %r -> %r",
+                text, stripped, bare_ipa,
+            )
+        refusal = _reject_reason(text, bare_ipa)
+        if refusal:
+            log.warning(
+                "IPA refused for name=%r: %s. Kokoro will voice the name "
+                "directly instead (ipa=%r)", text, refusal, bare_ipa,
+            )
+            bare_ipa = ""        # falls through to the plain-name attempt below
+        bare_ipa = bare_ipa.lstrip("ˈˌ")
+        bare_ipa = bare_ipa.replace(" ˈ", " ").replace(" ˌ", " ")
+        if bare_ipa:
+            attempts.append(f"[{text}](/{bare_ipa}/)")  # faithful IPA — override pronunciation
     attempts.append(text)  # plain name — Kokoro's own G2P
     folded = _ascii_fold(text)
     if folded and folded != text:

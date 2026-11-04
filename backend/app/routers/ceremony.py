@@ -14,9 +14,16 @@ and the single commit happen on the request thread, and superseded clips are
 deleted only *after* that commit. So a failure can leak a blob, but can never
 leave a row pointing at a deleted file.
 
-A participant whose render raises, or whose pronunciation the TTS guard
-refuses, keeps no clip and is named in the response — rather than silently
-getting a clip voiced from the spelling of their name.
+A participant whose pronunciation the TTS guard **refuses** keeps no clip and
+is named in the response — rather than silently getting a clip voiced from the
+spelling of their name. If they held a clip from an earlier run, it is cleared
+and the blob is deleted, in the same single post-commit loop as a superseded
+one, so the durable state cannot contradict the report.
+
+A render that **raises** is treated differently and deliberately so: it is
+named in the response, but any clip it already had is left alone. A refusal is
+a judgement that will repeat; a raise is an unknown and usually transient, and
+silence at a ceremony is worse than a clip that worked yesterday.
 """
 from __future__ import annotations
 
@@ -122,6 +129,10 @@ def render_ceremony(
     # future is guarded, so one bad name cannot discard the roster's work.
     outcomes: dict[int, _Outcome] = {}
     failures: list[RenderFailure] = []
+    # Phase 2 sees only `outcomes`, where a refusal and a raise are both just
+    # an absent entry -- but they must not be treated the same (see the module
+    # docstring), so the distinction is carried forward explicitly.
+    refused: set[int] = set()
     with ThreadPoolExecutor(max_workers=_RENDER_WORKERS) as pool:
         futures = {pool.submit(_render_one, p): p.id for p in participants}
         for future in as_completed(futures):
@@ -139,23 +150,40 @@ def render_ceremony(
             if outcome.reason:
                 log.warning("render refused for name=%r: %s", name, outcome.reason)
                 failures.append(RenderFailure(name=name, reason=outcome.reason))
+                refused.add(outcome.participant_id)
                 continue
             outcomes[outcome.participant_id] = outcome
 
     # Phase 2: DB writes and storage saves, serial, on the request thread.
-    superseded: list[str] = []
+    # One list for every blob this request orphans -- superseded by a fresh
+    # render, or withdrawn from a refused participant. Both are deleted in the
+    # single loop after the commit; neither is deleted here.
+    stale: list[str] = []
     rendered = 0
     for p in participants:
         outcome = outcomes.get(p.id)
         if outcome is None:
-            continue        # refused or failed -- leave the row exactly as it was
+            if p.id in refused and p.clip_key:
+                # The clip a refused participant holds came from confirm_ipa,
+                # where synthesize *degrades* rather than refuses -- so it is
+                # a reading of their spelling, the one thing a graduation must
+                # not broadcast. The report says they have no pronunciation;
+                # GET /ceremony has to agree.
+                #
+                # Provenance is left untouched on purpose: once the
+                # pronunciation is fixed, one more Prep Clips is a full
+                # recovery with no participant involvement.
+                stale.append(p.clip_key)
+                p.clip_key = None
+                db.add(p)
+            continue        # a raise keeps its clip -- see the module docstring
         if outcome.becomes_g2p:
             p.ipa_text = outcome.ipa_used
             p.ipa_source = IPASource.g2p.value
             p.ipa_confirmed = True
         p.validate_ipa_invariant()
         if p.clip_key:
-            superseded.append(p.clip_key)   # remembered, not deleted yet
+            stale.append(p.clip_key)        # remembered, not deleted yet
         p.clip_key = storage.save(outcome.wav_bytes, ext="wav")
         db.add(p)
         rendered += 1
@@ -166,12 +194,16 @@ def render_ceremony(
     # roll back every new clip_key while the old blobs were already gone --
     # rows pointing at deleted files, which is AUDIT.md §4.3's catastrophe by
     # another route. After it, the worst case is a leaked blob.
-    for key in superseded:
+    # Stronger for a withdrawn clip than for a superseded one: the row stopped
+    # referencing the key *before* the commit, so even a failed delete leaves
+    # no row pointing at a missing file. storage.delete is a no-op on a key
+    # that is already gone, in both backends.
+    for key in stale:
         try:
             storage.delete(key)
         except Exception as e:
             log.warning(
-                "superseded clip %r left in storage (%s: %s)", key, type(e).__name__, e,
+                "orphaned clip %r left in storage (%s: %s)", key, type(e).__name__, e,
             )
 
     return RenderReport(rendered=rendered, failures=failures)
@@ -201,6 +233,14 @@ def get_ceremony(
                 clip_url=clip_url,
                 ipa_text=p.ipa_text,
                 ipa_source=p.ipa_source,
+                # Computed, same as on the roster: lets the player tell a
+                # roster nobody has prepped from one where every name was
+                # refused -- a state this brief's render changes made
+                # reachable. See participants._to_read for the caveats.
+                clip_blocked_reason=(
+                    orchestrator.ipa_refusal(p.name, p.ipa_text)
+                    if p.ipa_text else None
+                ),
             )
         )
 

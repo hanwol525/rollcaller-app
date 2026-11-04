@@ -118,8 +118,22 @@
 					<td class="email">{p.email ?? '—'}</td>
 					<td><span class="badge badge-{p.status}">{statusLabels[p.status]}</span></td>
 					<td>
+						<!--
+							Four durable states, all derived from the response. This column
+							is the only signal that survives a reload — the render report
+							lives in `form`, which is null after one, and after every
+							redirecting action. "Needs attention" is the one that was
+							missing: without it a refused participant was indistinguishable
+							from one nobody had prepped yet.
+						-->
 						{#if p.clip_key}
 							<span class="badge badge-confirmed">Ready</span>
+						{:else if p.clip_blocked_reason}
+							<span class="badge badge-blocked" title={p.clip_blocked_reason}>
+								Needs attention
+							</span>
+						{:else if p.ipa_text}
+							<span class="badge badge-invited">Not prepared</span>
 						{:else}
 							<span class="badge badge-invited">None</span>
 						{/if}
@@ -385,6 +399,12 @@
 	.badge-confirmed {
 		background: #d4f0d4;
 		color: #2a7a2a;
+	}
+
+	/* Amber, not red: the ceremony still runs, this one name just needs a look. */
+	.badge-blocked {
+		background: #faecd0;
+		color: #8a5a1a;
 	}
 
 	.copy-btn {

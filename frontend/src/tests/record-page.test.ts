@@ -28,7 +28,7 @@ vi.mock('$lib/recorder', () => ({
 
 // Import after mocks are set up
 import RecordPage from '../routes/record/[token]/+page.svelte';
-import { getSelf, uploadRecording, previewIpa } from '$lib/api';
+import { getSelf, uploadRecording, previewIpa, confirmIpa } from '$lib/api';
 import { startRecording, stopRecording } from '$lib/recorder';
 import type { ParticipantSelf } from '$lib/api';
 
@@ -306,5 +306,60 @@ describe('re-recording', () => {
 		expect(container.textContent).toContain('pronunciation you entered yourself');
 		// The g2p line would be a lie here: recognition may well have worked.
 		expect(container.textContent).not.toContain("couldn't read a pronunciation");
+	});
+});
+
+// ─ A refused confirmation ─────────────────────────────────────────────────── //
+
+describe('a refused confirmation', () => {
+	/**
+	 * The backend now 422s a pronunciation the ceremony voice cannot use, so
+	 * this path exists for the first time. Writing the reason to `error` would
+	 * replace the whole card with one that has no buttons at all — stranding
+	 * the participant on the only screen that cannot be left, over the one
+	 * problem they could have fixed by recording again.
+	 *
+	 * Probe: setting `error` instead of `confirmError` in handleConfirm's catch
+	 * fails both assertions below.
+	 */
+	test('shows the reason in place and leaves Re-record reachable', async () => {
+		vi.mocked(getSelf).mockResolvedValue(makeSelf({ ipa_text: SAMPLE_IPA }));
+		vi.mocked(confirmIpa).mockRejectedValue(
+			new Error("That pronunciation cannot be used: contains the digit '0'")
+		);
+
+		const { container, getByRole } = renderRecordPage();
+		await waitFor(() => {
+			expect(container.textContent).toContain('Review your name');
+		});
+
+		await fireEvent.click(getByRole('button', { name: 'Confirm' }));
+		await waitFor(() => {
+			expect(container.textContent).toContain('cannot be used');
+		});
+
+		// Still on the review screen, not the dead-end error card.
+		expect(container.textContent).toContain('Review your name');
+		expect(getByRole('button', { name: 'Re-record' })).toBeInTheDocument();
+		// ⭐ and the refusal quotes the IPA back at nobody.
+		expect(container.textContent).not.toContain(SAMPLE_IPA);
+	});
+
+	test('re-recording clears the refusal', async () => {
+		vi.mocked(getSelf).mockResolvedValue(makeSelf({ ipa_text: SAMPLE_IPA }));
+		vi.mocked(confirmIpa).mockRejectedValue(new Error('cannot be used: nope'));
+		vi.mocked(startRecording).mockResolvedValue({} as unknown as MediaRecorder);
+
+		const { container, getByRole } = renderRecordPage();
+		await waitFor(() => {
+			expect(container.textContent).toContain('Review your name');
+		});
+		await fireEvent.click(getByRole('button', { name: 'Confirm' }));
+		await waitFor(() => {
+			expect(container.textContent).toContain('cannot be used');
+		});
+
+		await fireEvent.click(getByRole('button', { name: 'Re-record' }));
+		expect(container.textContent).not.toContain('cannot be used');
 	});
 });

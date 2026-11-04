@@ -16,6 +16,7 @@ id: number; name: string; email: string | null;
 status: string; position: number;
 ipa_text: string | null; ipa_source: string | null; ipa_confirmed: boolean;
 invite_token: string; recording_key: string | null; clip_key: string | null;
+clip_blocked_reason?: string | null;
 }[]>(`/spaces/${spaceId}/participants`, cookies);
 return { space, participants };
 };

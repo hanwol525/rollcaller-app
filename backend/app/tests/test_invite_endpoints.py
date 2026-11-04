@@ -447,3 +447,66 @@ class TestConfirmIPA:
             json={"ipa": "/x/", "is_edit": True},
         )
         assert resp.status_code == 404
+
+    def test_confirm_refuses_an_unusable_pronunciation_and_writes_nothing(
+        self, client, authed_client, make_participant, monkeypatch
+    ):
+        """Confirming is a promise that this pronunciation reaches the ceremony.
+
+        It used to accept anything: synthesize cleared the override and voiced
+        the *spelling*, so the participant was told they were confirmed, got a
+        clip, and only the organizer ever found out -- at Prep Clips, where
+        the renderer refused the same IPA this route had just accepted.
+
+        The row must be **untouched**, not written and rolled back, which is
+        why the check sits before the first assignment.
+        """
+        from app.pronunciation import orchestrator
+
+        space, p = make_participant(name="Alice Lee")
+
+        monkeypatch.setattr(
+            orchestrator, "render_clip",
+            lambda *a, **k: pytest.fail("a refused IPA must never be rendered"),
+        )
+
+        resp = client.post(
+            f"/invite/{p['invite_token']}/ipa/confirm",
+            json={"ipa": "rec044", "is_edit": True},
+        )
+        assert resp.status_code == 422, resp.text
+        assert "digit" in resp.json()["detail"]
+
+        row = [
+            x for x in authed_client.get(
+                f"/spaces/{space['id']}/participants"
+            ).json() if x["id"] == p["id"]
+        ][0]
+        assert row["ipa_text"] is None
+        assert row["ipa_source"] is None
+        assert row["ipa_confirmed"] is False
+        assert row["clip_key"] is None
+        assert row["status"] == "invited"
+
+    def test_confirm_still_accepts_a_usable_pronunciation(
+        self, client, make_participant, monkeypatch
+    ):
+        """The guard must not have become a wall.
+
+        Wrapped IPA especially: `/ˈælɪs/` is the old storage format and real
+        rows hold it, so refusing it would lock those participants out of
+        confirming at all. tts.prepare_ipa strips the wrappers before judging,
+        which is the whole point of Unit 3's half A.
+        """
+        from app.pronunciation import orchestrator
+
+        space, p = make_participant(name="Alice Lee")
+        monkeypatch.setattr(orchestrator, "render_clip", lambda *a, **k: b"RIFF")
+
+        resp = client.post(
+            f"/invite/{p['invite_token']}/ipa/confirm",
+            json={"ipa": "/ˈælɪs/", "is_edit": True},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["status"] == "confirmed"
+        assert resp.json()["ipa_source"] == "manual"

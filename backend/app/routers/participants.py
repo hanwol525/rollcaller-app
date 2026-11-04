@@ -22,9 +22,52 @@ from app.models import (
     ParticipantUpdate,
     Space,
 )
+from app.pronunciation import orchestrator
 from app.storage import storage
 
 router = APIRouter(prefix="/spaces/{space_id}/participants", tags=["participants"])
+
+
+def _to_read(p: Participant) -> ParticipantRead:
+    """ParticipantRead, plus the one field that is computed rather than stored.
+
+    ``clip_blocked_reason`` answers "will Prep Clips refuse this participant",
+    and it is derived on every read on purpose. A stored column would go stale
+    the moment the participant re-records, and it could drift from the
+    renderer's own judgement; this calls the same ``orchestrator`` façade
+    ``_render_one`` calls, so it cannot. It also needs no migration, which
+    matters because ``db.py`` is a bare ``create_all`` with no alembic.
+
+    Two things it deliberately does **not** do:
+
+    - It never runs g2p. A participant with no stored IPA reads as merely
+      "not prepared", even though the render might refuse the pronunciation
+      g2p would produce for them. Deriving that per row would mean an
+      espeak call per participant per page load, now serialised behind
+      ``g2p._espeak_lock`` — far too expensive for a read.
+    - It does not cover a render that *raised*. That has no row-local
+      signature at all, so those rows also read as "not prepared".
+
+    Both make the field under-report rather than over-report, which is the
+    right direction: it never claims a participant is blocked when they are
+    not.
+    """
+    return ParticipantRead(
+        id=p.id,
+        name=p.name,
+        email=p.email,
+        status=p.status,
+        position=p.position,
+        ipa_text=p.ipa_text,
+        ipa_source=p.ipa_source,
+        ipa_confirmed=p.ipa_confirmed,
+        invite_token=p.invite_token,
+        recording_key=p.recording_key,
+        clip_key=p.clip_key,
+        clip_blocked_reason=(
+            orchestrator.ipa_refusal(p.name, p.ipa_text) if p.ipa_text else None
+        ),
+    )
 
 
 def _get_space_or_404(db: Session, space_id: int) -> Space:
@@ -138,7 +181,7 @@ async def add_participants(
     db.commit()
     for p in created:
         db.refresh(p)
-    return created
+    return [_to_read(p) for p in created]
 
 
 @router.get("", response_model=list[ParticipantRead])
@@ -148,11 +191,12 @@ def list_participants(
     _org: Organizer = Depends(require_organizer),
 ):
     _get_space_or_404(db, space_id)
-    return db.exec(
+    rows = db.exec(
         select(Participant)
         .where(Participant.space_id == space_id)
         .order_by(Participant.position)
     ).all()
+    return [_to_read(p) for p in rows]
 
 
 @router.put("/{pid}", response_model=ParticipantRead)
@@ -176,7 +220,10 @@ def update_participant(
     db.add(p)
     db.commit()
     db.refresh(p)
-    return p
+    # Through the builder because this route can change the **name**, and the
+    # guard's letter-name rule counts the initials in it -- so a rename can
+    # change whether this participant is blocked.
+    return _to_read(p)
 
 
 @router.delete("/{pid}", status_code=status.HTTP_204_NO_CONTENT)
