@@ -79,7 +79,7 @@ The venv lives at **`backend/app/venv`** — not `backend/.venv`. Run backend co
 npm run dev          # Vite dev server on 5173 — the only working front end (see below)
 npm run build        # adapter-node -> build/index.js
 npm run check        # svelte-kit sync && svelte-check
-npm test             # vitest     — 20 tests, green
+npm test             # vitest     — 30 tests (counted, not yet run after the last change)
 npm run test:e2e     # playwright — needs a live backend on :8000 (see Gotchas)
 ```
 
@@ -202,6 +202,12 @@ replaced. `g2p` survives because it is derived from the spelling, which an uploa
 pronunciation than one we could. The upshot worth relying on: **`ipa_source == "recognized"` means
 "derived from the recording currently on file"**, which it did not before.
 
+**An upload that changes or clears `ipa_text` withdraws the participant's clip**, because that clip
+voices the old pronunciation. Without this, the roster said Ready and `GET /ceremony` served the
+previous take until someone happened to run Prep Clips. The row drops `clip_key` before the commit
+and the blob is deleted after it, the same ordering Prep Clips uses. An unchanged `ipa_text` (a kept
+`manual` or `g2p` entry, or the same IPA read again) keeps its clip.
+
 ⚠️ `manual` is currently unreachable from the shipped UI — `confirmIpa` is called from one place
 with `is_edit` hard-coded `false` and the record page has no IPA input — so both halves of that
 carve-out are forward-looking. The participant-facing `ParticipantSelf` therefore carries
@@ -288,7 +294,8 @@ re-records, could drift from the renderer's own judgement, and would need an `AL
 participant with no stored IPA reads as merely unprepared even if the render would refuse what g2p
 gives them — deriving that per row would be an espeak call per name per page load, now serialised
 behind `g2p._espeak_lock`. A render that *raised* has no row-local signature either. Under-reporting
-is the right direction: the field never claims someone is blocked when they are not.
+is the right direction: the field never claims someone is blocked when they are not. Both read
+models test `ipa_text is not None`, not truthiness, so a stored `""` reads as blocked.
 
 It exists because the render report lives in `form`, which is `null` after any reload and after all
 five redirecting actions — so the roster's **Clip column is the only durable signal**, and it used
@@ -333,7 +340,9 @@ former GKE setup did this at the nginx ingress. A bare adapter-node deploy with 
   `backend/Dockerfile:18` and `README.md:122`, and was also in the deleted `ci.yml`, but it is
   not in the Commands section above.
 - **A garbage guard sits at the TTS boundary, and it refuses rather than raises.**
-  `tts.py:_reject_reason` rejects IPA that contains a digit, that is mostly consecutive English
+  `tts.py:_reject_reason` rejects IPA that has nothing to voice (empty, wrapper-only like `/ /`,
+  or stress marks only — judged with stress removed, because `synthesize` strips it before
+  building the override), that contains a digit, that is mostly consecutive English
   letter *names*, or whose token ends in eSpeak's word for "letter" (how it narrates a script it
   cannot read: 李雷 → `tʃˈaɪniːzlˌɛɾɚ tʃˈaɪniːzlˌɛɾɚ`, "Chinese letter" twice). On a hit it logs
   and clears the override, so Kokoro voices the plain name via its own G2P. It deliberately does
@@ -399,7 +408,9 @@ former GKE setup did this at the nginx ingress. A bare adapter-node deploy with 
   `*_raises_when_pipeline_unavailable` tests used to pass only because `kokoro` wasn't installed,
   and failed the moment it was. They now force the condition themselves — nulling
   `tts._pipeline` is not enough, because `synthesize()` lazily re-warms at `tts.py:70`, so
-  `tts.warm` is neutered too.
+  `tts.warm` is neutered too. The two recognizer-unavailable tests in `test_models.py` force
+  theirs with `monkeypatch.setitem(sys.modules, "transformers", None)`, which makes the import
+  raise `ModuleNotFoundError` even where `transformers` is installed.
 - **`requirements.txt` is a `pip freeze` at `backend/app/requirements.txt`** — note the path, and
   note it pins both `phonemizer` and `phonemizer-fork` (same import package, non-deterministic
   winner) plus dead deps (`allosaurus`, `pyjwt`) and `pytest` into the production image.

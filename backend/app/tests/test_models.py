@@ -160,7 +160,7 @@ class TestPronunciationFallbacks:
         assert len(result) > 0
         assert isinstance(result, str)
 
-    def test_recognize_returns_none_when_unavailable(self, caplog):
+    def test_recognize_returns_none_when_unavailable(self, monkeypatch, caplog):
         """No recognizer means no IPA -- not an invented one.
 
         This replaces test_recognize_fallback_returns_non_empty, whose whole
@@ -168,14 +168,22 @@ class TestPronunciationFallbacks:
         ipa_source="recognized" and, once the TTS guard existed, guaranteed
         the participant no clip at all.
 
-        Live path here rather than a stub: `transformers` genuinely is not
-        installed in this venv.
+        The import failure is forced rather than assumed: `transformers` is a
+        pinned dependency, so relying on its absence would fail (or download
+        weights) on any full environment -- the trap CLAUDE.md's
+        don't-depend-on-an-absent-dependency Gotcha records. A None entry in
+        sys.modules makes the import raise ModuleNotFoundError.
         """
         import logging as _logging
-        from app.pronunciation.recognize import recognize
+        import sys
+        from app.pronunciation import recognize as rec
         caplog.set_level(_logging.WARNING)
+        monkeypatch.setitem(sys.modules, "transformers", None)
+        monkeypatch.setattr(rec, "_processor", None)
+        monkeypatch.setattr(rec, "_model", None)
+        monkeypatch.setattr(rec, "_warned_unavailable", False)
 
-        assert recognize(b"fake wav bytes 12345") is None
+        assert rec.recognize(b"fake wav bytes 12345") is None
 
         msgs = [r.getMessage() for r in caplog.records
                 if r.name == "app.pronunciation.recognize"]
@@ -186,10 +194,18 @@ class TestPronunciationFallbacks:
 
     def test_recognizer_unavailability_is_reported_once(self, monkeypatch, caplog):
         """Recognition runs once per upload, so a roster of recordings would
-        otherwise log the same line once each."""
+        otherwise log the same line once each.
+
+        Forces the import failure: with `transformers` really installed the
+        model would load, and each call would then log once of its own.
+        """
         import logging as _logging
+        import sys
         from app.pronunciation import recognize as rec
         caplog.set_level(_logging.WARNING)
+        monkeypatch.setitem(sys.modules, "transformers", None)
+        monkeypatch.setattr(rec, "_processor", None)
+        monkeypatch.setattr(rec, "_model", None)
         monkeypatch.setattr(rec, "_warned_unavailable", False)
 
         for _ in range(3):
@@ -315,7 +331,7 @@ class TestPronunciationFallbacks:
                     if r.name == "app.pronunciation.tts"]
 
     def test_garbage_guard_refuses_each_failure_mode(self):
-        """Each rule names its own cause -- the three need different fixes."""
+        """Each rule names its own cause -- they need different fixes."""
         from app.pronunciation.tts import _reject_reason
         cases = [
             # The live one: recognize._fallback reaches the renderer today via
@@ -323,6 +339,12 @@ class TestPronunciationFallbacks:
             ("Alice Lee", "rec044", "digit"),
             ("Nguyen", "ˈɛn dʒˈiː jˈuː wˈaɪ", "letter names"),
             ("Li Lei", "tʃˈaɪniːzlˌɛɾɚ", "letter"),
+            # Nothing to voice. Each survives prepare_ipa; the stress-only
+            # ones are emptied only by synthesize's stress strip.
+            ("Alice", "", "no phonemes"),
+            ("Alice", "/ /", "no phonemes"),
+            ("Alice", "ˈ", "no phonemes"),
+            ("Alice", "ˈ ˌ", "no phonemes"),
         ]
         for name, ipa, fragment in cases:
             reason = _reject_reason(name, ipa)

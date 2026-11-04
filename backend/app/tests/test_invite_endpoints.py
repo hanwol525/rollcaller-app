@@ -296,6 +296,87 @@ class TestUploadRecording:
             # which is exactly why keeping that IPA was a lie.
             assert after["recording_key"] != key_before
 
+    @pytest.mark.parametrize(
+        ("prior_source", "recognizes", "clip_survives"),
+        [
+            ("recognized", "ˈnjuː", False),
+            ("recognized", None, False),
+            ("recognized", "ˈoʊld", True),     # same IPA read again
+            ("manual", "ˈnjuː", True),
+            ("g2p", "ˈnjuː", False),
+            ("g2p", None, True),
+        ],
+        ids=[
+            "recognized-replaced-withdraws",
+            "recognized-cleared-withdraws",
+            "recognized-unchanged-keeps",
+            "manual-kept-keeps",
+            "g2p-replaced-withdraws",
+            "g2p-kept-keeps",
+        ],
+    )
+    def test_an_upload_withdraws_a_clip_whose_pronunciation_it_changed(
+        self, authed_client, make_participant, wav_bytes, monkeypatch,
+        prior_source, recognizes, clip_survives,
+    ):
+        """A clip voices the IPA it was rendered from.
+
+        The upload route never touched clip_key, so after a re-record the
+        roster still said Ready and GET /ceremony served the previous take
+        until someone happened to run Prep Clips -- and when a 'recognized'
+        IPA was cleared, the row held no IPA beside a clip voiced from a
+        deleted recording. The blob goes too, but only after the commit.
+        """
+        from app.pronunciation import orchestrator
+
+        space, p = make_participant(name="Alice Lee")
+        token, pid = p["invite_token"], p["id"]
+
+        def row():
+            rows = authed_client.get(f"/spaces/{space['id']}/participants").json()
+            return [x for x in rows if x["id"] == pid][0]
+
+        def upload():
+            resp = authed_client.post(
+                f"/invite/{token}/recording",
+                files={"file": ("r.wav", wav_bytes, "audio/wav")},
+            )
+            assert resp.status_code == 200, resp.text
+
+        monkeypatch.setattr(orchestrator, "render_clip", lambda *a, **k: b"RIFF")
+
+        if prior_source == "recognized":
+            monkeypatch.setattr(orchestrator, "recognize_recording", lambda wav: "ˈoʊld")
+            upload()
+            resp = authed_client.post(f"/spaces/{space['id']}/render")
+            assert resp.status_code == 200, resp.text
+        elif prior_source == "manual":
+            resp = authed_client.post(
+                f"/invite/{token}/ipa/confirm",
+                json={"ipa": "ˈmænjuəl", "is_edit": True},
+            )
+            assert resp.status_code == 200, resp.text
+        elif prior_source == "g2p":
+            monkeypatch.setattr(orchestrator, "g2p_name", lambda name: "bˈɑːb")
+            resp = authed_client.post(f"/spaces/{space['id']}/render")
+            assert resp.status_code == 200, resp.text
+        before = row()
+        assert before["ipa_source"] == prior_source, "prior state not set up"
+        clip_before = before["clip_key"]
+        assert clip_before is not None, "prior clip not set up"
+        clip_path = Path(settings.storage_fs_root) / clip_before
+
+        monkeypatch.setattr(orchestrator, "recognize_recording", lambda wav: recognizes)
+        upload()
+
+        after = row()
+        if clip_survives:
+            assert after["clip_key"] == clip_before
+            assert clip_path.exists()
+        else:
+            assert after["clip_key"] is None
+            assert not clip_path.exists()
+
 
 class TestPreviewIPA:
     @pytest.mark.integration
@@ -487,6 +568,47 @@ class TestConfirmIPA:
         assert row["ipa_confirmed"] is False
         assert row["clip_key"] is None
         assert row["status"] == "invited"
+
+    @pytest.mark.parametrize(
+        "ipa",
+        ["", "   ", "/ /", "[]", "ˈ", "ˈ ˌ"],
+        ids=["empty", "whitespace", "slash-wrapped-blank", "bracket-wrapped-blank",
+             "stress-only", "stress-marks-and-space"],
+    )
+    def test_confirm_refuses_a_pronunciation_with_nothing_to_voice(
+        self, client, authed_client, make_participant, monkeypatch, ipa
+    ):
+        """An empty override is not a pronunciation.
+
+        Every one of these survived the guard: prepare_ipa leaves "" or a stray
+        stress mark, no rule fired, and confirm stored it as confirmed while
+        synthesize -- which strips stress before building the override --
+        voiced the *spelling*. "/ /" was the worst case: non-empty in the row,
+        so Prep Clips passed it too and reported `failures: []`.
+        """
+        from app.pronunciation import orchestrator
+
+        space, p = make_participant(name="Alice Lee")
+        monkeypatch.setattr(
+            orchestrator, "render_clip",
+            lambda *a, **k: pytest.fail("a refused IPA must never be rendered"),
+        )
+
+        resp = client.post(
+            f"/invite/{p['invite_token']}/ipa/confirm",
+            json={"ipa": ipa, "is_edit": False},
+        )
+        assert resp.status_code == 422, resp.text
+        assert "no phonemes" in resp.json()["detail"]
+
+        row = [
+            x for x in authed_client.get(
+                f"/spaces/{space['id']}/participants"
+            ).json() if x["id"] == p["id"]
+        ][0]
+        assert row["ipa_text"] is None
+        assert row["ipa_confirmed"] is False
+        assert row["clip_key"] is None
 
     def test_confirm_still_accepts_a_usable_pronunciation(
         self, client, make_participant, monkeypatch

@@ -28,7 +28,7 @@ DEFAULT_LANGUAGE = "en-us"
 #
 # Membership means warm() has been attempted; a None value means it was
 # attempted and failed. That negative entry deliberately diverges from
-# tts.py:69 and recognize.py:32, which re-call warm() on every use:
+# tts.synthesize and recognize.recognize, which re-call warm() on every use:
 # constructing a backend costs ~2.3 s — ~1.6 s even when it fails — and g2p
 # runs once per participant, so retrying would cost minutes per render.
 _backends: dict[str, object | None] = {}
@@ -49,8 +49,9 @@ _warned_warm_failed: set[str] = set()
 # concurrent calls returning the wrong participant's IPA. Never zero.
 #
 # Everywhere else, thread safety here comes from worker purity plus phase
-# separation (ceremony.py:12-15). That is still right for the ORM; it simply
-# never covered a C library with global buffers under a pure Python function.
+# separation (see the ceremony.py module docstring). That is still right for
+# the ORM; it simply never covered a C library with global buffers under a
+# pure Python function.
 #
 # Reentrant because espeak_ipa holds it across its lazy warm() call and
 # warm() takes it too. Construction needs the lock in its own right, not
@@ -84,7 +85,7 @@ def warm(language: str = DEFAULT_LANGUAGE) -> None:
             )
         except Exception as e:
             # phonemizer absent, espeak-ng not loadable, or an unsupported
-            # language — the placeholder will be used for this language.
+            # language — g2p yields no IPA ("") for this language.
             _backends[language] = None
             if language not in _warned_warm_failed:
                 _warned_warm_failed.add(language)
@@ -93,7 +94,8 @@ def warm(language: str = DEFAULT_LANGUAGE) -> None:
                 # not be loaded or the language is not supported.
                 log.warning(
                     "eSpeak warm failed for language=%r (%s: %s) — g2p will "
-                    "return placeholder IPA", language, type(e).__name__, e,
+                    "return no IPA, so Prep Clips will refuse names that "
+                    "reach this floor", language, type(e).__name__, e,
                     exc_info=True,
                 )
 
@@ -142,30 +144,25 @@ def espeak_ipa(text: str, language: str = DEFAULT_LANGUAGE) -> str:
                     "eSpeak phonemize failed for name=%r language=%r (%s: %s)",
                     text, language, type(e).__name__, e,
                 )
-    # Fallback: very rough ASCII approximation so the pipeline still works
-    # in environments without espeak-ng (e.g. CI / test).
+    # No usable eSpeak result: report no IPA rather than invent one.
     return _fallback(text)
 
 
 def _fallback(text: str) -> str:
     """No IPA available. Returns "" instead of inventing a pronunciation.
 
-    The empty string is deliberate, not a placeholder. ``tts.py`` guards its
-    pronunciation override with ``if ipa:``, so an empty value makes Kokoro
-    skip the override and voice the name with its own G2P — an honest English
-    attempt, where the old ``/name_with_underscores/`` got the spelling read
-    back as phonemes.
-
-    It is "" and not None because ``ceremony.py`` writes this straight to
-    ``ipa_text`` alongside ``ipa_source="g2p"``, and None there trips
-    ``validate_ipa_invariant``'s both-or-neither rule, failing the whole batch.
-    Refusing to render the name at all needs ``ceremony.py``, which this brief
-    fences off.
+    The empty string is deliberate, not a placeholder; the old
+    ``/name_with_underscores/`` got the spelling read back as phonemes. What
+    "" means depends on the caller: the batch renderer
+    (``ceremony._render_one``) refuses it, so the participant gets no clip and
+    is named in the render report and nothing is written to ``ipa_text``.
+    ``tts.synthesize`` skips the override on an empty value, so a direct call
+    still voices the name with Kokoro's own G2P.
     """
     # Per call, deliberately not deduped: this is a real ceremony getting no
     # pronunciation, so which names it happened to is the whole point.
     log.warning(
-        "no IPA for name=%r — Kokoro will voice the name directly, which may "
-        "mispronounce it", text,
+        "no IPA for name=%r — Prep Clips will refuse it and report the name",
+        text,
     )
     return ""

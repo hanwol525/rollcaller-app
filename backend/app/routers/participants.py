@@ -65,7 +65,10 @@ def _to_read(p: Participant) -> ParticipantRead:
         recording_key=p.recording_key,
         clip_key=p.clip_key,
         clip_blocked_reason=(
-            orchestrator.ipa_refusal(p.name, p.ipa_text) if p.ipa_text else None
+            # `is not None`, not truthiness: a stored "" is a refusal at
+            # render time, so it must read as blocked, not "not prepared".
+            orchestrator.ipa_refusal(p.name, p.ipa_text)
+            if p.ipa_text is not None else None
         ),
     )
 

@@ -115,9 +115,10 @@ def render_ceremony(
     """Batch-render every ceremony clip for offline fallback.
 
     Partial success is a success: a participant whose render raises, or whose
-    pronunciation the TTS guard refuses, keeps no clip and is named in the
-    response. Everyone else still gets theirs. Previously one bad name 500'd
-    the batch and persisted nothing.
+    pronunciation the TTS guard refuses, gets no new clip and is named in the
+    response. A refusal also withdraws any clip they held; a raise keeps it
+    (see the module docstring). Everyone else still gets theirs. Previously
+    one bad name 500'd the batch and persisted nothing.
     """
     _get_space_or_404(db, space_id)
     participants = db.exec(
@@ -239,7 +240,7 @@ def get_ceremony(
                 # reachable. See participants._to_read for the caveats.
                 clip_blocked_reason=(
                     orchestrator.ipa_refusal(p.name, p.ipa_text)
-                    if p.ipa_text else None
+                    if p.ipa_text is not None else None
                 ),
             )
         )

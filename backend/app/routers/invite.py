@@ -20,6 +20,8 @@ Rules:
 """
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
 from sqlmodel import Session, select
 
@@ -35,7 +37,9 @@ from app.models import (
 from app.pronunciation import orchestrator
 from app.storage import storage
 
-router = APIRouter(prefix="/invite", tags=["invite"])
+log = logging.getLogger(__name__)
+
+router =APIRouter(prefix="/invite", tags=["invite"])
 
 
 def _get_participant_or_404(db: Session, token: str) -> Participant:
@@ -98,6 +102,10 @@ async def upload_recording(
     the recording currently on file" — it used to be able to describe a blob
     the same request had deleted.
 
+    Whenever this changes or clears ``ipa_text``, any existing clip is
+    withdrawn (blob deleted after the commit), because it voices the old
+    pronunciation. When ``ipa_text`` is unchanged, the clip stays.
+
     The upload is never rejected over a failed recognition: the audio is real
     and the cause is almost always server-side, and the batch renderer falls
     through to g2p so the ceremony still gets a usable clip. recognize.py logs
@@ -138,6 +146,7 @@ async def upload_recording(
     # The three fields always move together (invariant Rule 1). See the
     # decision table in the docstring for why each prior source behaves as it
     # does.
+    prior_ipa = p.ipa_text
     if p.ipa_source == IPASource.manual.value:
         pass                    # a human typed it; a recording never replaces it
     elif ipa:
@@ -156,12 +165,34 @@ async def upload_recording(
     # which this upload did not change.
     p.status = "recorded"
 
+    # A clip voices the pronunciation it was rendered from. If this upload
+    # changed or cleared that pronunciation, the clip now speaks a take that
+    # is no longer on file, so it is withdrawn and the roster reads "Not
+    # prepared" until the next Prep Clips. An unchanged pronunciation (a kept
+    # manual or g2p entry) keeps its clip.
+    stale_clip = None
+    if p.clip_key and p.ipa_text != prior_ipa:
+        stale_clip = p.clip_key
+        p.clip_key = None
+
     # Enforce the invariant explicitly (table models skip Pydantic validators).
     p.validate_ipa_invariant()
 
     db.add(p)
     db.commit()
     db.refresh(p)
+
+    # Deleted only after the commit, as in render_ceremony: the row stopped
+    # referencing the key before the commit, so a failed delete leaks a blob
+    # but never leaves a row pointing at a missing file.
+    if stale_clip:
+        try:
+            storage.delete(stale_clip)
+        except Exception as e:
+            log.warning(
+                "orphaned clip %r left in storage (%s: %s)",
+                stale_clip, type(e).__name__, e,
+            )
 
     return _build_participant_self(db, p)
 

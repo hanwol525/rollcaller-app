@@ -151,7 +151,7 @@ def _reject_reason(name: str, ipa: str) -> str | None:
     """Why this IPA must not reach Kokoro, or None when it is usable.
 
     Returns a sentence rather than a bool so the caller can log *which* rule
-    fired — the three failure modes need different fixes.
+    fired — the failure modes need different fixes.
 
     Prepares its own input, deliberately: every rule here is about what Kokoro
     will actually voice, so judging anything other than ``prepare_ipa``'s
@@ -160,6 +160,13 @@ def _reject_reason(name: str, ipa: str) -> str | None:
     Idempotent, so a caller that already prepared loses nothing.
     """
     ipa = prepare_ipa(ipa)
+
+    # Nothing left to voice. Judged with stress marks and whitespace removed,
+    # because synthesize strips stress before building the override: "", "/ /"
+    # and a lone "ˈ" all survive prepare_ipa yet leave Kokoro reading the
+    # spelling -- and confirm_ipa would have stored them as confirmed.
+    if not ipa.replace("ˈ", "").replace("ˌ", "").split():
+        return "it contains no phonemes to voice"
 
     found = _DIGIT_RE.search(ipa)
     if found:

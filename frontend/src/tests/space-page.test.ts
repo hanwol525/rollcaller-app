@@ -70,16 +70,33 @@ describe('the render report', () => {
 			]
 		});
 
-		expect(container.textContent).toContain('No pronunciation for 2');
+		expect(container.textContent).toContain('No new clip for 2');
 		expect(container.textContent).toContain('Nguyễn');
 		expect(container.textContent).toContain('Boom');
+	});
+
+	test('shows each reason, so a crash does not read as a missing pronunciation', () => {
+		// A raise keeps any clip it already had, so "no pronunciation" was wrong
+		// on both counts for it. The reason is what tells the two apart.
+		const { container } = renderPage({
+			action: 'render',
+			rendered: 1,
+			failures: [
+				{ name: 'Nguyễn', reason: "contains the digit '5'" },
+				{ name: 'Boom', reason: 'RuntimeError: Kokoro produced no audio' }
+			]
+		});
+
+		expect(container.textContent).toContain("contains the digit '5'");
+		expect(container.textContent).toContain('RuntimeError: Kokoro produced no audio');
+		expect(container.textContent).not.toContain('No pronunciation');
 	});
 
 	test('a clean run reports only the count', () => {
 		const { container } = renderPage({ action: 'render', rendered: 3, failures: [] });
 
 		expect(container.textContent).toContain('Prepared 3 clip(s).');
-		expect(container.textContent).not.toContain('No pronunciation');
+		expect(container.textContent).not.toContain('No new clip');
 	});
 
 	test('a run that prepared nothing does not claim success', () => {
@@ -89,7 +106,7 @@ describe('the render report', () => {
 			failures: [{ name: 'Alice', reason: 'no pronunciation could be derived' }]
 		});
 
-		expect(container.textContent).toContain('No pronunciation for 1');
+		expect(container.textContent).toContain('No new clip for 1');
 		expect(container.textContent).toContain('Alice');
 	});
 

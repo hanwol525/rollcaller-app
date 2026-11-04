@@ -44,8 +44,8 @@
 				<span class="error">{form.error}</span>
 			{:else if form.failures?.length}
 				<span class="warn"
-					>Prepared {form.rendered} clip(s). No pronunciation for {form.failures.length}:
-					{form.failures.map((f) => f.name).join(', ')}</span
+					>Prepared {form.rendered} clip(s). No new clip for {form.failures.length}:
+					{form.failures.map((f) => `${f.name} (${f.reason})`).join('; ')}</span
 				>
 			{:else if form.rendered !== undefined}
 				<span class="success">Prepared {form.rendered} clip(s).</span>

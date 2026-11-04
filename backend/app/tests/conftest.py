@@ -92,7 +92,7 @@ def client(db_engine, monkeypatch):
         # unwarmed condition. The lifespan does call warm_all() now, but the
         # monkeypatch above neuters it for this fixture, so nothing has been
         # loaded; the reset guards against leakage between tests that trigger
-        # a lazy warm (g2p.py, tts.py:70, recognize.py:32).
+        # a lazy warm (g2p.espeak_ipa, tts.synthesize, recognize.recognize).
         #
         # These are the real module globals. Two of them were previously
         # misnamed (`recognize._recognizer`, `tts._tts`), which silently
