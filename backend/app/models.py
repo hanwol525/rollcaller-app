@@ -33,7 +33,7 @@ class ParticipantStatus(str, Enum):
 
 class IPASource(str, Enum):
     g2p = "g2p"              # grapheme-to-phoneme (Espeak NG / phonemizer)
-    recognized = "recognized"  # audio-to-IPA (Allosaurus)
+    recognized = "recognized"  # audio-to-IPA (wav2vec2)
     manual = "manual"        # human-edited IPA
 
 
@@ -179,6 +179,11 @@ class ParticipantSelf(SQLModel):
     space_name: str          # name of the space/event, for participant screens
     status: ParticipantStatus
     ipa_text: Optional[str]
+    # Provenance, not phonetics: the record page needs it to tell "this came
+    # from your recording" from "this is the pronunciation already on file",
+    # which is reachable since a recording no longer replaces a manual one.
+    # The IPA *text* still never reaches the participant's screen.
+    ipa_source: Optional[str]
     ipa_confirmed: bool
 
 

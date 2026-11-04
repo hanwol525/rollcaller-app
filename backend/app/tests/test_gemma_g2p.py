@@ -14,7 +14,10 @@ import ast
 import logging
 import pathlib
 import sys
+import threading
+import time
 import types
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 import pytest
@@ -688,3 +691,113 @@ class TestSwallowSitesAreNotSilent:
                 if not logs:
                     offenders.append(f"{module}:{node.lineno}")
         assert not offenders, f"silent except handler(s): {offenders}"
+
+# ─ The shared eSpeak backend must not be used from two threads at once ────── #
+
+def _fake_shared_backend(monkeypatch, hold=0.02):
+    """Install an EspeakBackend that models espeak-ng's actual flaw.
+
+    The C library returns phonemes from library globals, so an overlapping
+    call overwrites the buffer the first caller is about to read. This fake
+    reproduces exactly that: write the request into one shared slot, pause,
+    then read the slot back. Serialized, every caller reads its own name;
+    overlapped, they read each other's.
+
+    Hermetic on purpose — it needs neither phonemizer nor espeak-ng, so it
+    cannot become a test that passes only because a dependency is absent
+    (CLAUDE.md's Gotcha, and the trap ``_fake_phonemizer`` above exists for).
+    Returns the tracker so a test can assert on observed concurrency.
+    """
+    tracker = {"slot": None, "live": 0, "peak": 0}
+    bookkeeping = threading.Lock()   # guards the counters, never the slot
+
+    class _Backend:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def phonemize(self, texts, strip=True):
+            with bookkeeping:
+                tracker["live"] += 1
+                tracker["peak"] = max(tracker["peak"], tracker["live"])
+            try:
+                tracker["slot"] = f"ipa-for-{texts[0]}"   # the library global
+                time.sleep(hold)
+                return [tracker["slot"]]                  # read it back
+            finally:
+                with bookkeeping:
+                    tracker["live"] -= 1
+
+    backend_mod = types.ModuleType("phonemizer.backend")
+    backend_mod.EspeakBackend = _Backend
+    pkg = types.ModuleType("phonemizer")
+    pkg.backend = backend_mod
+    monkeypatch.setitem(sys.modules, "phonemizer", pkg)
+    monkeypatch.setitem(sys.modules, "phonemizer.backend", backend_mod)
+    return tracker
+
+
+class TestEspeakBackendIsSerialized:
+    """``_backends`` shares one EspeakBackend per language, and ceremony.py
+    renders a roster on ``ThreadPoolExecutor(max_workers=4)``.
+
+    Measured before ``g2p._espeak_lock`` existed: 25 of 48 concurrent calls
+    returned another participant's IPA, and the renderer stored and voiced it
+    as that person's pronunciation while reporting ``failures: []``. The race
+    was dormant until the eSpeak floor was fixed — ``warm()`` used to call
+    ``phonemizer.backend.Backend``, which does not exist, so ``phonemize()``
+    was unreachable and a pre-existing thread pool never touched espeak.
+
+    The first concurrency tests in this repo; everywhere else thread safety
+    comes from worker purity plus phase separation, which is still correct for
+    the ORM and simply never covered a C library underneath a pure function.
+    """
+
+    _NAMES = [f"Name{i}" for i in range(12)]
+
+    def test_concurrent_callers_each_get_their_own_ipa(self, monkeypatch):
+        _fake_shared_backend(monkeypatch)
+        monkeypatch.setattr(g2p_module, "_backends", {})
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            got = list(pool.map(g2p_module.espeak_ipa, self._NAMES))
+
+        # Positive assertion, and the user-visible property: nobody got
+        # anybody else's pronunciation. Drop the `with _espeak_lock` in
+        # espeak_ipa and this fails.
+        assert got == [f"ipa-for-{n}" for n in self._NAMES], got
+
+    def test_phonemize_is_never_entered_concurrently(self, monkeypatch):
+        tracker = _fake_shared_backend(monkeypatch)
+        monkeypatch.setattr(g2p_module, "_backends", {})
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(g2p_module.espeak_ipa, self._NAMES))
+
+        # The mechanism, asserted directly rather than via its symptom, so a
+        # future fix that happens to hide the cross-assignment without
+        # serializing still fails here.
+        assert tracker["peak"] == 1, f"peak concurrent phonemize: {tracker['peak']}"
+
+    def test_one_backend_is_built_even_when_four_workers_warm_at_once(self, monkeypatch):
+        """The lock is reentrant because espeak_ipa warms while holding it.
+
+        Without that, four workers racing a cold cache each pay ~2.3 s to
+        build a backend and three are thrown away.
+        """
+        built = []
+        tracker = _fake_shared_backend(monkeypatch)
+        real = sys.modules["phonemizer.backend"].EspeakBackend
+
+        class _Counting(real):            # type: ignore[misc, valid-type]
+            def __init__(self, *args, **kwargs):
+                built.append(1)
+                super().__init__(*args, **kwargs)
+
+        sys.modules["phonemizer.backend"].EspeakBackend = _Counting
+        monkeypatch.setattr(g2p_module, "_backends", {})
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(g2p_module.espeak_ipa, self._NAMES))
+
+        assert len(built) == 1, f"backends constructed: {len(built)}"
+        assert tracker["peak"] == 1

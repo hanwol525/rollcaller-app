@@ -159,6 +159,24 @@ micError = '';
 <h1>Review your name</h1>
 <p class="subtitle">Hi {self?.name}, listen to how your name will be pronounced at the ceremony.</p>
 
+<!--
+	A pronunciation only reaches this screen from the current recording when
+	ipa_source is "recognized" — the upload route guarantees that. The other
+	two sources mean this take produced nothing usable (g2p) or that a
+	pronunciation the participant typed was deliberately kept (manual), and
+	saying so is the difference between a stale screen and an honest one.
+	Still no IPA text: the label is provenance, never phonetics.
+-->
+{#if self?.ipa_source === 'g2p'}
+<p class="notice">
+We couldn't read a pronunciation from your recording, so this is the one already on file for you.
+</p>
+{:else if self?.ipa_source === 'manual'}
+<p class="notice">
+This is the pronunciation you entered yourself. Your recording has been saved.
+</p>
+{/if}
+
 {#if micError}
 <p class="error-msg">{micError}</p>
 {/if}
@@ -431,5 +449,15 @@ padding: 0.8rem;
 border-radius: 8px;
 font-size: 0.9rem;
 margin: 0;
+}
+
+/* Not an error — the ceremony is still covered, so it must not read like one. */
+.notice {
+background: #f3f1ec;
+color: #5f5c55;
+padding: 0.8rem;
+border-radius: 8px;
+font-size: 0.9rem;
+margin: 0 0 1.25rem;
 }
 </style>

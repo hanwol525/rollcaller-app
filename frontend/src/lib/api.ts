@@ -6,6 +6,8 @@ export interface ParticipantSelf {
 	space_name: string;
 	status: ParticipantStatus;
 	ipa_text: string | null;
+	// Provenance, not phonetics. Optional so existing fixtures keep type-checking.
+	ipa_source?: string | null;
 	ipa_confirmed: boolean;
 }
 

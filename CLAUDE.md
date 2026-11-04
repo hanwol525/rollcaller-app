@@ -157,16 +157,45 @@ The load-bearing domain rule: a pronunciation's **provenance** matters. `Partici
 
 ⚠️ SQLModel `table=True` models do **not** run `@model_validator` on attribute assignment, so
 this is an explicitly-called method, not a validator. Any route that mutates IPA fields must call
-it before committing. Current call sites: `routers/ceremony.py:65`, `routers/invite.py:126`,
-`routers/invite.py:199`.
+it before committing. Call sites, named by function because the line numbers have now gone stale
+twice: `routers/invite.py::upload_recording`, `routers/invite.py::confirm_ipa`,
+`routers/ceremony.py::render_ceremony` (phase 2).
+
+⚠️ **The invariant is narrower than it looks, and two things it does not catch are load-bearing.**
+It couples only `ipa_text` / `ipa_source` / `ipa_confirmed` and says nothing about `status` or
+about whether a recording still exists. In particular `(None, None, True)` **passes** — a stale
+`ipa_confirmed` beside a null text is legal — so a route that clears IPA must reset all three
+itself. Do not try to express either rule as an invariant rule; they are route-level obligations.
 
 ### Request flow
 
 `POST /invite/{token}/recording` → transcode → recognize → store blob → `status="recorded"`.
 **The blob is stored and the status advances even when recognition yields nothing** — it used to
 raise 422 and throw the recording away, which punished the participant for a missing model. A
-`recorded` row with `ipa_text=None` is legal (`validate_ipa_invariant` couples only the three IPA
-fields, never `status`), and Prep Clips then takes its g2p branch.
+`recorded` row with `ipa_text=None` is legal, and Prep Clips then takes its g2p branch.
+
+**A recording never replaces a hand-typed pronunciation.** The IPA fields move with provenance, in
+both directions, and the route owns the whole table:
+
+| prior `ipa_source` | recognition succeeds | recognition yields nothing |
+|---|---|---|
+| `recognized` | replaced | **cleared**, all three fields |
+| `manual` | **kept** | **kept** |
+| `g2p` | replaced | kept |
+| `None` | set to `recognized` | stays `None` |
+
+`recognized` is cleared rather than kept because its provenance *was* the blob the same request
+deleted — keeping it described a recording that no longer existed, and that is the bug this
+replaced. `g2p` survives because it is derived from the spelling, which an upload does not change.
+`manual` survives both ways: a take we could not read is no more consent to discard a typed
+pronunciation than one we could. The upshot worth relying on: **`ipa_source == "recognized"` means
+"derived from the recording currently on file"**, which it did not before.
+
+⚠️ `manual` is currently unreachable from the shipped UI — `confirmIpa` is called from one place
+with `is_edit` hard-coded `false` and the record page has no IPA input — so both halves of that
+carve-out are forward-looking. The participant-facing `ParticipantSelf` therefore carries
+`ipa_source` (provenance, never the IPA text), because the record page has to distinguish "this
+came from your recording" from "this is the pronunciation already on file".
 Preview (`/ipa/preview`) returns raw WAV bytes and **deliberately does not persist** — a real
 product rule, but its only test (`test_preview_does_not_store`) is `@integration`, so since the
 CI gate was deleted it runs nowhere automatically (see Gotchas).
@@ -179,6 +208,21 @@ instances), every write and the single commit happen on the request thread, and 
 is deleted **only after that commit**. So the worst a failure can do is leak a blob; it can never
 leave a row pointing at a deleted file. This is the only endpoint in the codebase that reports
 per-item failure — there is no other partial-success convention to match.
+
+⚠️ **Worker purity is not the whole thread-safety story.** It covers the ORM, which is what it was
+written for. What it never covered is a C library with global buffers underneath a pure Python
+function: `_render_one` calls `g2p` → `espeak_ipa`, espeak-ng returns phonemes from library
+globals, and `g2p._backends` deliberately shares one `EspeakBackend` per language. So concurrent
+`phonemize()` calls handed each participant another participant's IPA — measured anywhere from
+52% to 87% of calls under the 4-worker pool (it is a race; the rate moves with timing and roster
+size) — which the renderer then stored with `ipa_source="g2p"`, `ipa_confirmed=True` while
+reporting `failures: []`. **`g2p._espeak_lock` is the only lock in the codebase.** It is a
+`threading.RLock` because `espeak_ipa` holds it across its lazy `warm()` call, and construction
+needs it in its own right: `EspeakAPI.__init__` loads its own copy of the library and calls
+`espeak_Initialize`. It deliberately does **not** cover `gemma_ipa`, which is an HTTP call that
+must stay parallel. This was dormant until Brief 03 fixed the eSpeak floor — `warm()` used to call
+`phonemizer.backend.Backend`, a symbol that package does not export, so `phonemize()` was
+unreachable and the pre-existing pool never touched espeak at all.
 
 Auth is two unrelated schemes: organizer sessions are opaque DB-backed tokens (no JWT, despite
 `pyjwt` being pinned), and participants authenticate purely by possessing an invite token.
@@ -211,9 +255,12 @@ former GKE setup did this at the nginx ingress. A bare adapter-node deploy with 
   x86_64, macOS 12.7.6). `torch`'s last macOS x86_64 wheel is **2.2.2**; later macOS wheels
   are arm64-only and macOS 14+, and `requirements.txt` pins `torch==2.13.0+cpu`, which has no
   macOS wheel at all. `kokoro` needs `torch`, so **the 12 `@integration` tests can never run on
-  this Mac** — they need Linux or an arm64 Mac on macOS 14+. Expected local state is **155
-  passed, 15 skipped, 0 failed** (170 collected): 11 skip without `kokoro`, 4 transcode tests
+  this Mac** — they need Linux or an arm64 Mac on macOS 14+. Expected local state is **158
+  passed, 15 skipped, 0 failed** (173 collected): 11 skip without `kokoro`, 4 transcode tests
   skip without `ffmpeg`. Treat any *failure* as a regression; the skips are the design.
+  (The counts stated elsewhere in this file — "the 12 `@integration` tests", "16 of the 127
+  backend tests", "the other 11" — are a census that has gone stale and is fenced to the brief
+  that owns the test files. This line is the measured one.)
 - **In the slim venv a recording produces no IPA at all, and that is now the honest answer.**
   `recognize()` needs `transformers`, which is absent here, so it returns `None` and logs
   `wav2vec2 recognizer unavailable (ModuleNotFoundError: ...)` **once per process**. The recording

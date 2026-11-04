@@ -27,6 +27,7 @@ from app.db import get_session
 from app.models import (
     IPAConfirmRequest,
     IPAPreviewRequest,
+    IPASource,
     Participant,
     ParticipantSelf,
     Space,
@@ -56,6 +57,7 @@ def _build_participant_self(db: Session, p: Participant) -> ParticipantSelf:
         space_name=space.name if space else "",
         status=p.status,
         ipa_text=p.ipa_text,
+        ipa_source=p.ipa_source,
         ipa_confirmed=p.ipa_confirmed,
     )
 
@@ -75,16 +77,31 @@ async def upload_recording(
     """Upload a WAV recording. Stores the blob and switches status to
     'recorded'.
 
-    When wav2vec2 derives IPA, it is stored as ipa_source='recognized' — which
-    per the model invariant requires ipa_confirmed=True — and the participant
-    can preview and confirm via the other endpoints.
+    **A recording never replaces a hand-typed pronunciation.** The IPA fields
+    move with provenance, in both directions:
 
-    When it derives nothing, the recording is **still stored** and ipa_text /
-    ipa_source stay None/None, the invariant's named "no pronunciation
-    received" state. The batch renderer then falls through to g2p, so the
-    ceremony still gets a usable clip. recognize.py logs which of the three
-    reasons it was; this route does not reject the upload over it, because the
-    audio is real and the cause is almost always server-side.
+        prior ipa_source | recognition succeeds | recognition yields nothing
+        -----------------+----------------------+--------------------------
+        recognized       | replaced             | cleared
+        manual           | kept                 | kept
+        g2p              | replaced             | kept
+        None             | set to recognized    | stays None
+
+    'recognized' is cleared rather than kept because its provenance *was* the
+    blob this request just deleted, so keeping it would describe a recording
+    that no longer exists. 'g2p' survives because it is derived from the
+    spelling, which this upload did not change, and the next render re-derives
+    it anyway. 'manual' survives both ways: a human typed it on purpose, and a
+    take we could not read is no more consent to discard it than one we could.
+
+    So after this route, ipa_source='recognized' reliably means "derived from
+    the recording currently on file" — it used to be able to describe a blob
+    the same request had deleted.
+
+    The upload is never rejected over a failed recognition: the audio is real
+    and the cause is almost always server-side, and the batch renderer falls
+    through to g2p so the ceremony still gets a usable clip. recognize.py logs
+    which of the three reasons it was.
     """
     p = _get_participant_or_404(db, token)
 
@@ -118,14 +135,25 @@ async def upload_recording(
     recording_key = storage.save(wav, ext="wav")
     p.recording_key = recording_key
 
-    if ipa:
-        # Set ipa_text + ipa_source together (they move together).
+    # The three fields always move together (invariant Rule 1). See the
+    # decision table in the docstring for why each prior source behaves as it
+    # does.
+    if p.ipa_source == IPASource.manual.value:
+        pass                    # a human typed it; a recording never replaces it
+    elif ipa:
         # recognized requires ipa_confirmed=True per the model invariant.
         p.ipa_text = ipa
         p.ipa_source = "recognized"
         p.ipa_confirmed = True
-    # else: leave both None -- "no pronunciation received". Keeping the
-    # recording matters: it is real audio, and g2p covers the ceremony.
+    elif p.ipa_source == IPASource.recognized.value:
+        # Its provenance was the blob deleted just above. ipa_confirmed is
+        # reset explicitly because validate_ipa_invariant accepts
+        # (None, None, True) and so cannot catch a stale flag.
+        p.ipa_text = None
+        p.ipa_source = None
+        p.ipa_confirmed = False
+    # else: g2p, or nothing at all, survives -- derived from the spelling,
+    # which this upload did not change.
     p.status = "recorded"
 
     # Enforce the invariant explicitly (table models skip Pydantic validators).

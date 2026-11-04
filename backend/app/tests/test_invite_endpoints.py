@@ -1,9 +1,13 @@
 """Tests for /invite/{token} endpoints: self, recording, preview, confirm.
 
-This file covers the ACCEPTANCE CRITERIA:
-  A WAV file gets POSTed to /invite/{token}/recording successfully with a
-  non-null ipa, the blob gets stored, the status switches to "recorded", and
-  ipa_text and ipa_source are both set (never independently).
+The acceptance criterion this file was written against — "a WAV gets POSTed
+successfully **with a non-null ipa**, and ipa_text and ipa_source are both
+set" — was retracted. A recording is now stored and the status advances even
+when recognition yields nothing, so a `recorded` row with no IPA is a legal
+outcome rather than a failure. What still holds is the *coupling*: the three
+IPA fields only ever move together, and they move with the recording's
+provenance (see test_an_upload_moves_the_ipa_with_its_provenance for the
+whole table).
 """
 from __future__ import annotations
 
@@ -198,6 +202,99 @@ class TestUploadRecording:
         new_path = Path(settings.storage_fs_root) / key2
         assert not old_path.exists()  # old deleted
         assert new_path.exists()       # new exists
+
+    @pytest.mark.parametrize(
+        ("prior_source", "recognizes", "expected"),
+        [
+            ("recognized", "ˈnjuː", ("ˈnjuː", "recognized", True)),
+            ("recognized", None, (None, None, False)),
+            ("manual", "ˈnjuː", ("ˈmænjuəl", "manual", True)),
+            ("manual", None, ("ˈmænjuəl", "manual", True)),
+            ("g2p", "ˈnjuː", ("ˈnjuː", "recognized", True)),
+            ("g2p", None, ("bˈɑːb", "g2p", True)),
+        ],
+        ids=[
+            "recognized-is-replaced",
+            "recognized-is-cleared",
+            "manual-survives-a-readable-take",
+            "manual-survives-an-unreadable-take",
+            "g2p-is-replaced",
+            "g2p-survives-an-unreadable-take",
+        ],
+    )
+    def test_an_upload_moves_the_ipa_with_its_provenance(
+        self, authed_client, make_participant, wav_bytes, monkeypatch,
+        prior_source, recognizes, expected,
+    ):
+        """The whole decision table, both directions.
+
+        Two defects live here. A re-record that read nothing used to keep the
+        previous take's IPA while deleting the blob that produced it, leaving
+        ipa_source='recognized' describing a recording that no longer existed.
+        And a re-record that read something used to overwrite a hand-typed
+        pronunciation and stamp the machine's as confirmed.
+
+        Recognition is monkeypatched in **both** directions on purpose. Letting
+        it fail by itself -- `transformers` is absent on this machine -- would
+        make every "recognized" prior state unreachable and the test would pass
+        against the bug it exists for. That is the trap CLAUDE.md's "don't let
+        a test depend on a dependency being absent" Gotcha records.
+
+        The `manual` rows are not optional coverage: without them, "always
+        overwrite" and "always clear" both pass, and the carve-out gets deleted
+        by the next person who simplifies the branch.
+        """
+        from app.pronunciation import orchestrator
+
+        space, p = make_participant(name="Alice Lee")
+        token, pid = p["invite_token"], p["id"]
+
+        def row():
+            rows = authed_client.get(f"/spaces/{space['id']}/participants").json()
+            return [x for x in rows if x["id"] == pid][0]
+
+        def upload():
+            resp = authed_client.post(
+                f"/invite/{token}/recording",
+                files={"file": ("r.wav", wav_bytes, "audio/wav")},
+            )
+            assert resp.status_code == 200, resp.text
+
+        monkeypatch.setattr(orchestrator, "render_clip", lambda *a, **k: b"RIFF")
+
+        # Reach each prior state through a real route, never a direct DB write.
+        if prior_source == "recognized":
+            monkeypatch.setattr(orchestrator, "recognize_recording", lambda wav: "ˈoʊld")
+            upload()
+        elif prior_source == "manual":
+            resp = authed_client.post(
+                f"/invite/{token}/ipa/confirm",
+                json={"ipa": "ˈmænjuəl", "is_edit": True},
+            )
+            assert resp.status_code == 200, resp.text
+        elif prior_source == "g2p":
+            monkeypatch.setattr(orchestrator, "g2p_name", lambda name: "bˈɑːb")
+            resp = authed_client.post(f"/spaces/{space['id']}/render")
+            assert resp.status_code == 200, resp.text
+        assert row()["ipa_source"] == prior_source, "prior state not set up"
+
+        key_before = row()["recording_key"]
+
+        # Record again, with recognition forced either way.
+        monkeypatch.setattr(orchestrator, "recognize_recording", lambda wav: recognizes)
+        upload()
+
+        after = row()
+        assert (
+            after["ipa_text"], after["ipa_source"], after["ipa_confirmed"]
+        ) == expected
+        # The recording is kept and the status advances whatever came of it.
+        assert after["status"] == "recorded"
+        assert after["recording_key"] is not None
+        if key_before is not None:
+            # The blob that the old 'recognized' IPA described is now gone --
+            # which is exactly why keeping that IPA was a lie.
+            assert after["recording_key"] != key_before
 
 
 class TestPreviewIPA:

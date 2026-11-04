@@ -11,6 +11,7 @@ engine behind it is an implementation detail.
 from __future__ import annotations
 
 import logging
+import threading
 
 from app.pronunciation.gemma import gemma_ipa
 
@@ -36,6 +37,28 @@ _backends: dict[str, object | None] = {}
 # produces one line rather than one per participant.
 _warned_warm_failed: set[str] = set()
 
+# The only lock in the codebase, and it guards a C library rather than Python
+# state. espeak-ng keeps its phoneme buffers in library globals -- phonemizer
+# says so itself, and sidesteps it by copying the shared library per wrapper
+# instance (phonemizer/backend/espeak/api.py, EspeakAPI.__init__) -- while
+# _backends deliberately shares ONE instance per language. Under
+# ceremony.py's 4-worker pool that means concurrent phonemize() calls return
+# each other's phonemes, which the renderer then stored and voiced as that
+# person's pronunciation with no failure reported. It is a race, so the rate
+# moves with timing and roster size -- measured anywhere from 52% to 87% of
+# concurrent calls returning the wrong participant's IPA. Never zero.
+#
+# Everywhere else, thread safety here comes from worker purity plus phase
+# separation (ceremony.py:12-15). That is still right for the ORM; it simply
+# never covered a C library with global buffers under a pure Python function.
+#
+# Reentrant because espeak_ipa holds it across its lazy warm() call and
+# warm() takes it too. Construction needs the lock in its own right, not
+# merely to avoid duplicated work: EspeakAPI.__init__ loads its own copy of
+# the library and calls espeak_Initialize, so building a backend while
+# another thread is inside phonemize() is itself unsafe.
+_espeak_lock = threading.RLock()
+
 
 def warm(language: str = DEFAULT_LANGUAGE) -> None:
     """Pre-load the phonemizer backend for one language.
@@ -46,27 +69,33 @@ def warm(language: str = DEFAULT_LANGUAGE) -> None:
 
     Both module containers are mutated in place rather than rebound, so no
     ``global`` is needed — and so a reset must ``.clear()`` them.
+
+    Takes ``_espeak_lock``: ``EspeakAPI.__init__`` calls ``espeak_Initialize``
+    on its library copy, so constructing a backend while another thread sits
+    inside ``phonemize()`` is unsafe on its own — and two workers racing a
+    cold cache would each pay ~2.3 s to build one that gets discarded.
     """
-    try:
-        from phonemizer.backend import EspeakBackend
-        _backends[language] = EspeakBackend(
-            language=language,
-            with_stress=True,
-        )
-    except Exception as e:
-        # phonemizer absent, espeak-ng not loadable, or an unsupported
-        # language — the placeholder will be used for this language.
-        _backends[language] = None
-        if language not in _warned_warm_failed:
-            _warned_warm_failed.add(language)
-            # The exception type is the whole diagnosis: ModuleNotFoundError
-            # means phonemizer is absent, RuntimeError means espeak-ng could
-            # not be loaded or the language is not supported.
-            log.warning(
-                "eSpeak warm failed for language=%r (%s: %s) — g2p will "
-                "return placeholder IPA", language, type(e).__name__, e,
-                exc_info=True,
+    with _espeak_lock:
+        try:
+            from phonemizer.backend import EspeakBackend
+            _backends[language] = EspeakBackend(
+                language=language,
+                with_stress=True,
             )
+        except Exception as e:
+            # phonemizer absent, espeak-ng not loadable, or an unsupported
+            # language — the placeholder will be used for this language.
+            _backends[language] = None
+            if language not in _warned_warm_failed:
+                _warned_warm_failed.add(language)
+                # The exception type is the whole diagnosis: ModuleNotFoundError
+                # means phonemizer is absent, RuntimeError means espeak-ng could
+                # not be loaded or the language is not supported.
+                log.warning(
+                    "eSpeak warm failed for language=%r (%s: %s) — g2p will "
+                    "return placeholder IPA", language, type(e).__name__, e,
+                    exc_info=True,
+                )
 
 
 def g2p(text: str) -> str:
@@ -88,26 +117,31 @@ def espeak_ipa(text: str, language: str = DEFAULT_LANGUAGE) -> str:
     boundary (``tts.py``). When eSpeak cannot help, ``_fallback`` returns ""
     rather than inventing a pronunciation.
     """
-    if language not in _backends:
-        warm(language)                 # lazy self-heal on first use
-    backend = _backends.get(language)
-    if backend is not None:
-        try:
-            result = backend.phonemize([text], strip=True)
-            ipa = (result[0] if isinstance(result, list) else str(result)).strip()
-            if ipa:
-                return ipa
-            # A blank name phonemizes to "". Worth distinguishing from a
-            # backend failure even though both end at _fallback.
-            log.warning(
-                "eSpeak returned empty IPA for name=%r language=%r",
-                text, language,
-            )
-        except Exception as e:
-            log.warning(
-                "eSpeak phonemize failed for name=%r language=%r (%s: %s)",
-                text, language, type(e).__name__, e,
-            )
+    # Serialized: the shared backend's phonemes come out of espeak-ng's
+    # library globals, so two workers calling at once get each other's. See
+    # _espeak_lock. The lock does NOT extend to gemma_ipa -- g2p() calls that
+    # first, and it is an HTTP request that must stay parallel.
+    with _espeak_lock:
+        if language not in _backends:
+            warm(language)                 # lazy self-heal on first use
+        backend = _backends.get(language)
+        if backend is not None:
+            try:
+                result = backend.phonemize([text], strip=True)
+                ipa = (result[0] if isinstance(result, list) else str(result)).strip()
+                if ipa:
+                    return ipa
+                # A blank name phonemizes to "". Worth distinguishing from a
+                # backend failure even though both end at _fallback.
+                log.warning(
+                    "eSpeak returned empty IPA for name=%r language=%r",
+                    text, language,
+                )
+            except Exception as e:
+                log.warning(
+                    "eSpeak phonemize failed for name=%r language=%r (%s: %s)",
+                    text, language, type(e).__name__, e,
+                )
     # Fallback: very rough ASCII approximation so the pipeline still works
     # in environments without espeak-ng (e.g. CI / test).
     return _fallback(text)
