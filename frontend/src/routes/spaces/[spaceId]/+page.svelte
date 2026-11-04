@@ -40,10 +40,15 @@
 	<form method="POST" action="?/render" class="render-form">
 		<button type="submit" class="btn-primary">Prep Clips</button>
 		{#if form?.action === 'render'}
-			{#if form.rendered !== undefined}
-				<span class="success">Prepared {form.rendered} clip(s).</span>
-			{:else if form.error}
+			{#if form.error}
 				<span class="error">{form.error}</span>
+			{:else if form.failures?.length}
+				<span class="warn"
+					>Prepared {form.rendered} clip(s). No pronunciation for {form.failures.length}:
+					{form.failures.map((f) => f.name).join(', ')}</span
+				>
+			{:else if form.rendered !== undefined}
+				<span class="success">Prepared {form.rendered} clip(s).</span>
 			{/if}
 		{/if}
 	</form>
@@ -99,6 +104,7 @@
 				<th>Name</th>
 				<th>Email</th>
 				<th>Status</th>
+				<th>Clip</th>
 				<th>Invite Link</th>
 				<th>Reorder</th>
 				<th></th>
@@ -111,6 +117,13 @@
 					<td>{p.name}</td>
 					<td class="email">{p.email ?? '—'}</td>
 					<td><span class="badge badge-{p.status}">{statusLabels[p.status]}</span></td>
+					<td>
+						{#if p.clip_key}
+							<span class="badge badge-confirmed">Ready</span>
+						{:else}
+							<span class="badge badge-invited">None</span>
+						{/if}
+					</td>
 					<td>
 						<button onclick={() => copyLink(p.invite_token)} class="copy-btn">
 							{copiedToken === p.invite_token ? 'Copied!' : 'Copy Link'}
@@ -299,6 +312,11 @@
 
 	.error {
 		color: #c33;
+		font-size: 0.85rem;
+	}
+
+	.warn {
+		color: #a05a00;
 		font-size: 0.85rem;
 	}
 

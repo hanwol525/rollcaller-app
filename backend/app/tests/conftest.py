@@ -103,6 +103,7 @@ def client(db_engine, monkeypatch):
         g2p._warned_warm_failed.clear()
         recognize._processor = None
         recognize._model = None
+        recognize._warned_unavailable = False
         transcode._ffmpeg_path = None
         tts._pipeline = None
         yield c

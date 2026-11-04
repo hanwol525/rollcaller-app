@@ -3,9 +3,11 @@
 Responsibilities:
   - warm_all(): load the four stages once at startup (via the FastAPI
     lifespan) — eSpeak g2p, the wav2vec2 recognizer, Kokoro TTS, ffmpeg.
-  - recognize_recording(wav_bytes) -> ipa: audio -> IPA via wav2vec2.
+  - recognize_recording(wav_bytes) -> ipa | None: audio -> IPA via wav2vec2.
   - render_clip(name, ipa_text) -> wav_bytes: IPA -> audio via Kokoro TTS.
   - g2p_name(name) -> ipa: grapheme -> IPA (delegates to the g2p module).
+  - ipa_refusal(name, ipa) -> reason | None: the TTS garbage guard, exposed so
+    a caller can apply its own policy to a refusal.
 
 TTS fallback inside the batch renderer looks like:
     ipa = participant.ipa_text or g2p(participant.name)
@@ -33,9 +35,23 @@ def normalize_recording(raw: bytes) -> bytes:
     return transcode.to_wav(raw)
 
 
-def recognize_recording(wav_bytes: bytes) -> str:
-    """Audio-to-IPA for a participant recording."""
+def recognize_recording(wav_bytes: bytes) -> str | None:
+    """Audio-to-IPA for a participant recording, or None if none was derived."""
     return recognize.recognize(wav_bytes)
+
+
+def ipa_refusal(name: str, ipa: str) -> str | None:
+    """Why this IPA must not be voiced, or None when it is usable.
+
+    A façade over the TTS boundary's garbage guard, so routers can decide what
+    a refusal *means* — routers call only this module (see CLAUDE.md).
+    ``tts.synthesize`` applies the same guard defensively and degrades to
+    speaking the plain name, which is right for a participant previewing their
+    own recording. The batch renderer uses this to refuse the participant
+    outright instead, because a confident wrong announcement at a ceremony is
+    worse than a reported gap.
+    """
+    return tts._reject_reason(name, ipa)
 
 
 def render_clip(name: str, ipa_text: str | None = None) -> bytes:

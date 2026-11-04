@@ -160,11 +160,86 @@ class TestPronunciationFallbacks:
         assert len(result) > 0
         assert isinstance(result, str)
 
-    def test_recognize_fallback_returns_non_empty(self):
+    def test_recognize_returns_none_when_unavailable(self, caplog):
+        """No recognizer means no IPA -- not an invented one.
+
+        This replaces test_recognize_fallback_returns_non_empty, whose whole
+        premise was the `rec###` placeholder. That value was stored as
+        ipa_source="recognized" and, once the TTS guard existed, guaranteed
+        the participant no clip at all.
+
+        Live path here rather than a stub: `transformers` genuinely is not
+        installed in this venv.
+        """
+        import logging as _logging
         from app.pronunciation.recognize import recognize
-        result = recognize(b"fake wav bytes 12345")
-        assert len(result) > 0
-        assert isinstance(result, str)
+        caplog.set_level(_logging.WARNING)
+
+        assert recognize(b"fake wav bytes 12345") is None
+
+        msgs = [r.getMessage() for r in caplog.records
+                if r.name == "app.pronunciation.recognize"]
+        assert any("unavailable" in m for m in msgs), msgs
+        # The exception type is named, so "not installed" is distinguishable
+        # from "the weights would not load".
+        assert any("ModuleNotFoundError" in m for m in msgs), msgs
+
+    def test_recognizer_unavailability_is_reported_once(self, monkeypatch, caplog):
+        """Recognition runs once per upload, so a roster of recordings would
+        otherwise log the same line once each."""
+        import logging as _logging
+        from app.pronunciation import recognize as rec
+        caplog.set_level(_logging.WARNING)
+        monkeypatch.setattr(rec, "_warned_unavailable", False)
+
+        for _ in range(3):
+            assert rec.recognize(b"x" * 1024) is None
+
+        msgs = [r.getMessage() for r in caplog.records
+                if r.name == "app.pronunciation.recognize"]
+        assert len(msgs) == 1, msgs
+
+    def test_recognize_reports_an_exception_distinctly(self, monkeypatch, caplog):
+        """An exception inside inference must read differently from the
+        recognizer being absent. The silent `except Exception: pass` this
+        replaces made the two indistinguishable.
+
+        Asserts the *shape* of the report, not which exception: pinning the
+        type would make the test depend on which package the venv happens to
+        be missing, which is the trap CLAUDE.md's don't-depend-on-an-absent-
+        dependency Gotcha records.
+        """
+        import logging as _logging
+        from app.pronunciation import recognize as rec
+        caplog.set_level(_logging.WARNING)
+
+        # Pretend the model loaded, so the unavailable branch is skipped and
+        # the inference block runs and throws.
+        monkeypatch.setattr(rec, "_processor", object())
+        monkeypatch.setattr(rec, "_model", object())
+
+        assert rec.recognize(b"x" * 1024) is None
+        msgs = [r.getMessage() for r in caplog.records
+                if r.name == "app.pronunciation.recognize"]
+        assert any("recognition failed" in m for m in msgs), msgs
+        assert not any("unavailable" in m for m in msgs), msgs
+
+    def test_recognize_self_heals_when_only_the_processor_is_missing(
+        self, monkeypatch
+    ):
+        """The asymmetry: the trigger used to test `_model is None` while the
+        use-site required both, so a half-load never retried and every
+        recording silently fell through."""
+        from app.pronunciation import recognize as rec
+
+        monkeypatch.setattr(rec, "_processor", None)
+        monkeypatch.setattr(rec, "_model", object())   # half-loaded
+
+        warmed = []
+        monkeypatch.setattr(rec, "warm", lambda: warmed.append(True))
+
+        rec.recognize(b"x" * 1024)
+        assert warmed == [True], "a half-load must still retry warm()"
 
     def test_synthesize_raises_when_pipeline_unavailable(self, monkeypatch):
         """With no Kokoro pipeline, synthesize must raise — no silent tone fallback.
@@ -387,10 +462,9 @@ class TestPronunciationFallbacks:
         assert targets <= vocab, sorted(targets - vocab)
 
     def test_orchestrator_recognize_recording(self):
+        """The façade passes the None through rather than substituting."""
         from app.pronunciation.orchestrator import recognize_recording
-        result = recognize_recording(b"fake audio")
-        assert isinstance(result, str)
-        assert len(result) > 0
+        assert recognize_recording(b"fake audio") is None
 
     @pytest.mark.integration
     @pytest.mark.skipif(not KOKORO_AVAILABLE, reason="kokoro not installed")

@@ -72,12 +72,19 @@ async def upload_recording(
     db: Session = Depends(get_session),
     file: UploadFile = File(...),
 ):
-    """Upload a WAV recording. Stores the blob, runs Allosaurus recognition,
-    sets ipa_text/ipa_source to the recognized IPA, and switches status to
+    """Upload a WAV recording. Stores the blob and switches status to
     'recorded'.
 
-    Per the model invariant, ipa_source='recognized' requires ipa_confirmed=True.
-    The participant can then preview/edit and confirm via the other endpoints.
+    When wav2vec2 derives IPA, it is stored as ipa_source='recognized' — which
+    per the model invariant requires ipa_confirmed=True — and the participant
+    can preview and confirm via the other endpoints.
+
+    When it derives nothing, the recording is **still stored** and ipa_text /
+    ipa_source stay None/None, the invariant's named "no pronunciation
+    received" state. The batch renderer then falls through to g2p, so the
+    ceremony still gets a usable clip. recognize.py logs which of the three
+    reasons it was; this route does not reject the upload over it, because the
+    audio is real and the cause is almost always server-side.
     """
     p = _get_participant_or_404(db, token)
 
@@ -100,14 +107,10 @@ async def upload_recording(
             detail=str(exc),
         )
 
-    # Run audio-to-IPA recognition (Allosaurus) BEFORE saving the blob,
-    # so a recognition failure doesn't leave an orphaned file on disk.
+    # Run audio-to-IPA recognition (wav2vec2). A None result no longer aborts
+    # the upload, so this no longer has to precede the save to avoid orphaning
+    # a blob -- it stays first only because it needs nothing from storage.
     ipa = orchestrator.recognize_recording(wav)
-    if not ipa:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Could not recognize IPA from audio",
-        )
 
     # Store the recording blob (now honestly WAV, not raw browser bytes)
     if p.recording_key:
@@ -115,11 +118,14 @@ async def upload_recording(
     recording_key = storage.save(wav, ext="wav")
     p.recording_key = recording_key
 
-    # Set ipa_text + ipa_source together (they move together).
-    # recognized requires ipa_confirmed=True per the model invariant.
-    p.ipa_text = ipa
-    p.ipa_source = "recognized"
-    p.ipa_confirmed = True
+    if ipa:
+        # Set ipa_text + ipa_source together (they move together).
+        # recognized requires ipa_confirmed=True per the model invariant.
+        p.ipa_text = ipa
+        p.ipa_source = "recognized"
+        p.ipa_confirmed = True
+    # else: leave both None -- "no pronunciation received". Keeping the
+    # recording matters: it is real audio, and g2p covers the ceremony.
     p.status = "recorded"
 
     # Enforce the invariant explicitly (table models skip Pydantic validators).

@@ -207,3 +207,21 @@ class CeremonyData(SQLModel):
     space_name: str
     advanced_seconds: int
     roster: list[CeremonyItem]
+
+
+class RenderFailure(SQLModel):
+    """One participant who came out of a batch render with no clip."""
+    name: str
+    reason: str
+
+
+class RenderReport(SQLModel):
+    """Result of a batch render.
+
+    `failures` is empty on a clean run. It is a 200 body rather than an error
+    detail because a partial render is a partial success -- and because the
+    frontend's serverFetch flattens any non-2xx body into an opaque string,
+    so an HTTPException detail could not be read structurally.
+    """
+    rendered: int
+    failures: list[RenderFailure] = []

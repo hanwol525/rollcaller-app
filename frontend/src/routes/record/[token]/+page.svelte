@@ -155,6 +155,7 @@ micError = '';
 {:else if screen === 'review'}
 <div class="card review">
 <p class="event-name">{self?.space_name}</p>
+{#if self?.ipa_text}
 <h1>Review your name</h1>
 <p class="subtitle">Hi {self?.name}, listen to how your name will be pronounced at the ceremony.</p>
 
@@ -181,6 +182,24 @@ micError = '';
 Re-record
 </button>
 </div>
+{:else}
+<h1>Recording saved</h1>
+<p class="subtitle">Thanks {self?.name} — we've kept your recording.</p>
+<p class="error-msg">
+We couldn't read a pronunciation from it, so the ceremony will use a standard
+reading of your name. You can record again if you'd like to try.
+</p>
+
+{#if micError}
+<p class="error-msg">{micError}</p>
+{/if}
+
+<div class="actions">
+<button onclick={handleReRecord} class="btn-secondary">
+Re-record
+</button>
+</div>
+{/if}
 </div>
 
 {:else if screen === 'recording'}

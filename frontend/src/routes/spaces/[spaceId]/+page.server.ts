@@ -121,10 +121,13 @@ reorder: async ({ request, params, cookies }) => {
 render: async ({ params, cookies }) => {
 const spaceId = parseInt(params.spaceId, 10);
 try {
-const result = await serverFetch<{ rendered: number }>(`/spaces/${spaceId}/render`, cookies, {
+const result = await serverFetch<{
+rendered: number;
+failures: { name: string; reason: string }[];
+}>(`/spaces/${spaceId}/render`, cookies, {
 method: 'POST'
 });
-return { action: 'render', rendered: result.rendered };
+return { action: 'render', rendered: result.rendered, failures: result.failures };
 } catch (e) {
 if (isRedirect(e)) throw e;
 return { action: 'render', error: String(e) };

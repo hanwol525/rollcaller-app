@@ -331,7 +331,9 @@ class TestG2pFallsBackWhenGemmaUnavailable:
             "gemma_ipa": gemma_ipa("Bob"),
             "espeak_ipa": espeak_ipa("Bob"),
             "g2p._fallback": g2p_module._fallback("Hannah Wolfson"),
-            "recognize._fallback": recognize._fallback(b"x" * 4096),
+            # recognize._fallback is gone: it invented `rec###` IPA, which the
+            # TTS guard then refused, so a recorded participant got no clip.
+            # recognize() returns None now and has no format to get wrong.
         }
         for label, value in produced.items():
             assert "/" not in value, f"{label} returned {value!r}"
@@ -658,13 +660,18 @@ class TestSwallowSitesAreNotSilent:
 
     # --- the structural guard ---------------------------------------------
 
-    def test_no_except_handler_in_either_module_is_silent(self):
-        """Encodes this unit's acceptance criterion directly, so a later unit
-        cannot quietly reintroduce a silent swallow. A handler that genuinely
-        must stay silent should add an explicit exemption here."""
+    def test_no_except_handler_in_the_pipeline_is_silent(self):
+        """Encodes Brief 03 Unit 2's acceptance criterion directly, so a later
+        change cannot quietly reintroduce a silent swallow. A handler that
+        genuinely must stay silent should add an explicit exemption here.
+
+        recognize.py joined the list once it gained a logger: Unit 5 left it
+        out precisely because its `except Exception: pass` would have failed
+        this. transcode.py is still absent -- it has no logger yet.
+        """
         pronunciation = pathlib.Path(__file__).resolve().parent.parent / "pronunciation"
         offenders = []
-        for module in ("g2p.py", "gemma.py"):
+        for module in ("g2p.py", "gemma.py", "recognize.py"):
             path = pronunciation / module
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):

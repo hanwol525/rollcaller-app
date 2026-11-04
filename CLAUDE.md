@@ -79,7 +79,7 @@ The venv lives at **`backend/app/venv`** — not `backend/.venv`. Run backend co
 npm run dev          # Vite dev server on 5173 — the only working front end (see below)
 npm run build        # adapter-node -> build/index.js
 npm run check        # svelte-kit sync && svelte-check
-npm test             # vitest     — 12 tests, green
+npm test             # vitest     — 20 tests, green
 npm run test:e2e     # playwright — needs a live backend on :8000 (see Gotchas)
 ```
 
@@ -121,7 +121,7 @@ façade. Every stage defines a `warm()`, all four self-heal on first use, and
 | Stage | Module | Does | Lazy self-heal |
 |---|---|---|---|
 | transcode | `transcode.py` | ffmpeg → canonical 16 kHz mono WAV (browser sends WebM/Opus or MP4/AAC) | ✅ re-probes PATH |
-| recognize | `recognize.py` | wav2vec2 CTC (`facebook/wav2vec2-lv-60-espeak-cv-ft`) audio → IPA | ✅ |
+| recognize | `recognize.py` | wav2vec2 CTC (`facebook/wav2vec2-lv-60-espeak-cv-ft`) audio → IPA, else `None` + a log line | ✅ |
 | g2p | `g2p.py` → `gemma.py` | LLM over an OpenAI-compatible endpoint, with a working eSpeak NG floor beneath it | ✅ per language |
 | tts | `tts.py` | Kokoro 82M, IPA → WAV, using `[name](/ipa/)` pronunciation-override markup | ✅ |
 
@@ -129,7 +129,7 @@ façade. Every stage defines a `warm()`, all four self-heal on first use, and
 never synthesizes. Robotic output means Kokoro is voicing bad IPA, never that eSpeak synthesized
 something.
 
-**Bare IPA is the storage format.** Every producer (`gemma_ipa`, `espeak_ipa`, both `_fallback`s)
+**Bare IPA is the storage format.** Every producer (`gemma_ipa`, `espeak_ipa`, `g2p._fallback`)
 returns IPA with no `/slashes/`. Slashes are Kokoro markup and are added only at the TTS boundary,
 by `tts.py`. The `.strip("/[]")` there is defensive, not load-bearing.
 
@@ -142,11 +142,12 @@ it returns `hˈænə wˈʊlfsən`.
 ⚠️ `AUDIT.md` §4.1 still describes the old state as live, and §7 holds a **wrong refutation**
 about it — see the corrected row in that ledger. Prefer this file for the g2p path.
 
-When eSpeak genuinely cannot help, the floor returns `""` rather than inventing a pronunciation,
-and Kokoro voices the name with its own G2P. That is honest but not a *visible* failure: a clip is
-still produced. Refusing to render the name needs `routers/ceremony.py`, still deferred.
-Constructing an `EspeakBackend` costs ~2.3 s, so failures are cached per language rather
-than retried per name.
+When eSpeak genuinely cannot help, the floor returns `""` rather than inventing a pronunciation.
+At the TTS boundary that degrades to Kokoro voicing the name with its own G2P — right for a
+participant previewing their own recording. **The batch renderer refuses it instead**: that
+participant gets no clip and is named in the render response, so the organizer can fix it before
+the ceremony rather than hearing it during one. Constructing an `EspeakBackend` costs ~2.3 s, so
+failures are cached per language rather than retried per name.
 
 ### The IPA invariant
 
@@ -162,11 +163,22 @@ it before committing. Current call sites: `routers/ceremony.py:65`, `routers/inv
 ### Request flow
 
 `POST /invite/{token}/recording` → transcode → recognize → store blob → `status="recorded"`.
+**The blob is stored and the status advances even when recognition yields nothing** — it used to
+raise 422 and throw the recording away, which punished the participant for a missing model. A
+`recorded` row with `ipa_text=None` is legal (`validate_ipa_invariant` couples only the three IPA
+fields, never `status`), and Prep Clips then takes its g2p branch.
 Preview (`/ipa/preview`) returns raw WAV bytes and **deliberately does not persist** — a real
 product rule, but its only test (`test_preview_does_not_store`) is `@integration`, so since the
-CI gate was deleted it runs nowhere automatically (see Gotchas). `POST /spaces/{id}/render`
-("Prep Clips") batch-renders the roster on a `ThreadPoolExecutor`, with all DB writes and a
-single commit on the request thread.
+CI gate was deleted it runs nowhere automatically (see Gotchas).
+
+`POST /spaces/{id}/render` ("Prep Clips") batch-renders the roster on a `ThreadPoolExecutor` and
+**returns a partial-success report** — `{rendered, failures: [{name, reason}]}` — because one
+unrenderable name must not discard everyone else's clips. The ordering is load-bearing:
+`_render_one` is pure (no ORM writes, since worker threads must not mutate Session-owned
+instances), every write and the single commit happen on the request thread, and a superseded clip
+is deleted **only after that commit**. So the worst a failure can do is leak a blob; it can never
+leave a row pointing at a deleted file. This is the only endpoint in the codebase that reports
+per-item failure — there is no other partial-success convention to match.
 
 Auth is two unrelated schemes: organizer sessions are opaque DB-backed tokens (no JWT, despite
 `pyjwt` being pinned), and participants authenticate purely by possessing an invite token.
@@ -199,9 +211,18 @@ former GKE setup did this at the nginx ingress. A bare adapter-node deploy with 
   x86_64, macOS 12.7.6). `torch`'s last macOS x86_64 wheel is **2.2.2**; later macOS wheels
   are arm64-only and macOS 14+, and `requirements.txt` pins `torch==2.13.0+cpu`, which has no
   macOS wheel at all. `kokoro` needs `torch`, so **the 12 `@integration` tests can never run on
-  this Mac** — they need Linux or an arm64 Mac on macOS 14+. Expected local state is **146
-  passed, 16 skipped, 0 failed** (162 collected): 12 skip without `kokoro`, 4 transcode tests
+  this Mac** — they need Linux or an arm64 Mac on macOS 14+. Expected local state is **155
+  passed, 15 skipped, 0 failed** (170 collected): 11 skip without `kokoro`, 4 transcode tests
   skip without `ffmpeg`. Treat any *failure* as a regression; the skips are the design.
+- **In the slim venv a recording produces no IPA at all, and that is now the honest answer.**
+  `recognize()` needs `transformers`, which is absent here, so it returns `None` and logs
+  `wav2vec2 recognizer unavailable (ModuleNotFoundError: ...)` **once per process**. The recording
+  is still stored and the participant still shows `recorded`; Prep Clips falls through to g2p on
+  the spelling. **This is a slim-venv condition, not a production one** — `kokoro` depends on
+  `transformers`, so any environment that can synthesize can also recognize. It is worth knowing
+  because it makes the local app quietly *different from* production rather than broken: every
+  clip you hear locally is g2p-derived, never recording-derived, so you cannot evaluate
+  recognition quality on this machine at all.
 - **`pip install -r app/requirements.txt` does not succeed as written.** The
   `torch==2.13.0+cpu` pin is a local version PyPI cannot serve, so the install needs
   `--extra-index-url https://download.pytorch.org/whl/cpu`. That flag lives in
@@ -212,12 +233,17 @@ former GKE setup did this at the nginx ingress. A bare adapter-node deploy with 
   letter *names*, or whose token ends in eSpeak's word for "letter" (how it narrates a script it
   cannot read: 李雷 → `tʃˈaɪniːzlˌɛɾɚ tʃˈaɪniːzlˌɛɾɚ`, "Chinese letter" twice). On a hit it logs
   and clears the override, so Kokoro voices the plain name via its own G2P. It deliberately does
-  **not** raise: `ceremony.py:97`'s `future.result()` is unguarded, so one odd name would 500 the
-  whole roster. Two non-obvious constraints: letter-name IPA is *correct* for initials, so the run
+  **not** raise — degrading is right for a participant previewing their own recording, and the
+  batch renderer applies the stricter policy itself via `orchestrator.ipa_refusal`, refusing the
+  participant outright. (It used to be justified by `future.result()` being unguarded; that is
+  fixed, but refuse-don't-raise is still correct here.) Two non-obvious constraints:
+  letter-name IPA is *correct* for initials, so the run
   must exceed the name's single-character words or "J R R Tolkien" is rejected; and the "letter"
-  check is token-**final**, or `Letterman` → `lˈɛɾɚmən` is rejected. Before the guard,
-  `recognize._fallback`'s `rec044` reached Kokoro as `[Alice Lee](/rec044/)` through the ceremony
-  batch render with no client involvement.
+  check is token-**final**, or `Letterman` → `lˈɛɾɚmən` is rejected. The guard was built against
+  `recognize._fallback`'s fake `rec044`, which reached Kokoro as `[Alice Lee](/rec044/)` through
+  the batch render with no client involvement; that `_fallback` is now deleted, so what the guard
+  actually earns its place against is **real** output — a mis-scripted name from the recognizer or
+  a stray gemma response.
 - **Kokoro's phoneme vocabulary is a closed set of 114 symbols, and anything outside it is
   dropped silently.** `kokoro/model.py` does
   `filter(lambda i: i is not None, map(lambda p: self.vocab.get(p), phonemes))` — no unknown

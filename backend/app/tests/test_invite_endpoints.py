@@ -52,8 +52,14 @@ class TestUploadRecording:
     def test_recording_success_acceptance_criteria(
         self, client, make_participant, wav_bytes
     ):
-        """Core acceptance: WAV posted -> non-null ipa, blob stored,
-        status='recorded', ipa_text+ipa_source both set."""
+        """Core acceptance: WAV posted -> blob stored, status='recorded'.
+
+        The IPA half is now conditional. Where wav2vec2 is unavailable -- this
+        venv, since `transformers` needs a torch with no macOS x86_64 wheel --
+        the recording is still kept and ipa_text/ipa_source stay None/None,
+        the invariant's named "no pronunciation received" state. The upload
+        used to 422 here, and before that it stored an invented `rec###`.
+        """
         space, p = make_participant(name="Alice Lee")
 
         resp = client.post(
@@ -63,15 +69,8 @@ class TestUploadRecording:
         assert resp.status_code == 200, resp.text
         data = resp.json()
 
-        # Status switched to "recorded"
+        # Status switched to "recorded" -- audio exists, whatever came of it.
         assert data["status"] == "recorded"
-
-        # IPA is non-null
-        assert data["ipa_text"] is not None
-        assert len(data["ipa_text"]) > 0
-
-        # ipa_confirmed is True (recognized requires it per invariant)
-        assert data["ipa_confirmed"] is True
 
         # Verify the blob was stored — check the recording_key in the DB
         # via the organizer roster endpoint
@@ -85,16 +84,54 @@ class TestUploadRecording:
         assert participant["recording_key"] is not None
         assert participant["recording_key"]  # non-empty string
 
-        # ipa_text and ipa_source both set (never independently)
-        assert participant["ipa_text"] is not None
-        assert participant["ipa_source"] == "recognized"
-        # The invariant: both None or both filled
+        # The invariant holds either way: both None or both filled.
         assert (participant["ipa_text"] is None) == (participant["ipa_source"] is None)
+        if participant["ipa_text"] is None:
+            # No recognizer: nothing is claimed about the pronunciation.
+            assert participant["ipa_source"] is None
+            assert participant["ipa_confirmed"] is False
+        else:
+            assert participant["ipa_source"] == "recognized"
+            assert participant["ipa_confirmed"] is True
 
         # Verify blob is actually on disk
         blob_path = Path(settings.storage_fs_root) / participant["recording_key"]
         assert blob_path.exists()
         assert blob_path.stat().st_size > 0
+
+    def test_unrecognized_recording_still_gets_a_ceremony_clip(
+        self, client, authed_client, make_participant, wav_bytes, monkeypatch
+    ):
+        """The whole point of the change, end to end.
+
+        Before: the upload stored an invented `rec###` as "recognized", the
+        TTS guard refused it for containing digits, and that participant got
+        no clip at all. Now the recording is kept with no IPA claimed, and
+        Prep Clips falls through to g2p -- so a real pronunciation of their
+        name reaches the ceremony.
+        """
+        from app.pronunciation import orchestrator
+
+        space, p = make_participant(name="Alice Lee")
+
+        resp = client.post(
+            f"/invite/{p['invite_token']}/recording",
+            files={"file": ("recording.wav", wav_bytes, "audio/wav")},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["ipa_text"] is None     # nothing claimed
+
+        monkeypatch.setattr(orchestrator, "render_clip", lambda *a, **k: b"RIFF")
+        resp = authed_client.post(f"/spaces/{space['id']}/render")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["failures"] == [], resp.json()
+        assert resp.json()["rendered"] == 1
+
+        roster = authed_client.get(f"/spaces/{space['id']}/participants").json()
+        participant = [x for x in roster if x["id"] == p["id"]][0]
+        assert participant["clip_key"] is not None       # the clip exists
+        assert participant["ipa_source"] == "g2p"        # honest provenance
+        assert participant["recording_key"] is not None  # recording kept
 
     def test_recording_bad_token_404(self, client, wav_bytes):
         resp = client.post(

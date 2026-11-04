@@ -139,3 +139,34 @@ describe('resumability — refresh mid-flow never resets progress', () => {
 		expect(container.textContent).not.toContain('Review your name');
 	});
 });
+// ─ No pronunciation was derived ───────────────────────────────────────────── //
+
+describe('review screen when no pronunciation could be read', () => {
+	test('says so plainly, and offers re-record instead of confirm', async () => {
+		// `recorded` with no IPA is a legal row: the recording was stored but
+		// the recognizer produced nothing. Before this branch existed, the page
+		// showed the full review UI and both Preview and Confirm returned
+		// silently on `if (!ipaText) return;` — a dead end with no message.
+		//
+		// The assertion is positive, unlike the three invariants above: a null
+		// fixture paired with a `not.toContain` is what made the landing-screen
+		// test unfalsifiable (see its comment). Deleting the {:else} branch
+		// fails this test.
+		const self = makeSelf({ status: 'recorded', ipa_text: null });
+		vi.mocked(getSelf).mockResolvedValue(self);
+
+		const { container } = renderRecordPage();
+
+		await waitFor(() => {
+			expect(container.textContent).toContain('Recording saved');
+		});
+
+		expect(container.textContent).toContain('read a pronunciation from it');
+		expect(container.textContent).toContain('Re-record');
+
+		// Nothing to preview and nothing to confirm, so neither control renders.
+		expect(container.textContent).not.toContain('Confirm');
+		expect(container.textContent).not.toContain('Hear your name');
+		expect(container.textContent).not.toContain('Review your name');
+	});
+});

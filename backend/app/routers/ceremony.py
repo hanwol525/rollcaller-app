@@ -3,19 +3,26 @@
 - POST /spaces/{id}/render  -> batch-render every ceremony clip for offline fallback
 - GET  /spaces/{id}/ceremony -> ordered roster/clip URLs for player
 
-TTS fallback lives inside the batch renderer:
-    ipa = participant.ipa_text or orchestrator.g2p_name(participant.name)
-Every participant gets a clip even if they submitted nothing. When the final
-IPA source being used is g2p, ipa_source is set to "g2p" even if the user
-submitted a separate audio clip.
+TTS fallback lives inside the batch renderer: a participant with no stored
+pronunciation gets one from g2p. A stored one always wins — recognition and
+confirmation both set ipa_confirmed, so a recording is never regenerated.
 
 The render phase (g2p + Kokoro TTS) runs in a thread pool — g2p is an HTTP
 call (releases GIL) and Kokoro is CPU inference (torch releases GIL) — so
-participants are processed concurrently. DB writes stay serial.
+participants are processed concurrently. Workers are **pure**: every DB write
+and the single commit happen on the request thread, and superseded clips are
+deleted only *after* that commit. So a failure can leak a blob, but can never
+leave a row pointing at a deleted file.
+
+A participant whose render raises, or whose pronunciation the TTS guard
+refuses, keeps no clip and is named in the response — rather than silently
+getting a clip voiced from the spelling of their name.
 """
 from __future__ import annotations
 
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import NamedTuple
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlmodel import Session, select
@@ -25,12 +32,17 @@ from app.db import get_session
 from app.models import (
     CeremonyData,
     CeremonyItem,
+    IPASource,
     Organizer,
     Participant,
+    RenderFailure,
+    RenderReport,
     Space,
 )
 from app.pronunciation import orchestrator
 from app.storage import storage
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/spaces/{space_id}", tags=["ceremony"])
 
@@ -47,27 +59,47 @@ def _get_space_or_404(db: Session, space_id: int) -> Space:
     return space
 
 
-def _render_one(p: Participant) -> tuple[Participant, bytes]:
-    """Render a single participant's clip. Returns (participant, wav_bytes).
+class _Outcome(NamedTuple):
+    """What one worker produced. `reason` set means no clip for this name."""
+    participant_id: int
+    wav_bytes: bytes | None
+    ipa_used: str | None
+    becomes_g2p: bool
+    reason: str | None
 
-    Called from a thread pool — both g2p (HTTP) and Kokoro (torch CPU) release
-    the GIL, so this parallelizes effectively.
+
+def _render_one(p: Participant) -> _Outcome:
+    """Render one participant's clip. **Pure** — no ORM writes, no DB access.
+
+    Runs in a worker thread, so it must not touch the Session-owned instance:
+    writing here was AUDIT.md §4.7's first defect, and once partial results
+    commit it would stamp g2p provenance onto participants whose render
+    failed. Phase 2 applies every change on the request thread instead.
+
+    A stored pronunciation always wins. The confirmation flag is deliberately
+    not consulted: by invariant Rule 3 an unconfirmed entry is always
+    "manual", a state no route can produce, so requiring confirmation here
+    would only ever discard a pronunciation someone put there on purpose.
     """
-    if p.ipa_text is not None and p.ipa_confirmed:
-        ipa_to_render = p.ipa_text
+    if p.ipa_text is not None:
+        ipa, becomes_g2p = p.ipa_text, False
     else:
-        # TTS fallback: no confirmed IPA -> use g2p on the name
-        ipa_to_render = orchestrator.g2p_name(p.name)
-        p.ipa_text = ipa_to_render
-        p.ipa_source = "g2p"
-        p.ipa_confirmed = True
+        ipa, becomes_g2p = orchestrator.g2p_name(p.name), True
 
-    p.validate_ipa_invariant()
-    wav_bytes = orchestrator.render_clip(p.name, ipa_text=ipa_to_render)
-    return p, wav_bytes
+    # An empty IPA means the g2p floor had nothing to offer; Kokoro would fall
+    # back to guessing from the spelling. Both count as refusals here.
+    refusal = (
+        orchestrator.ipa_refusal(p.name, ipa) if ipa
+        else "no pronunciation could be derived from the name"
+    )
+    if refusal:
+        return _Outcome(p.id, None, ipa, becomes_g2p, refusal)
+
+    wav_bytes = orchestrator.render_clip(p.name, ipa_text=ipa)
+    return _Outcome(p.id, wav_bytes, ipa, becomes_g2p, None)
 
 
-@router.post("/render", status_code=status.HTTP_200_OK)
+@router.post("/render", response_model=RenderReport, status_code=status.HTTP_200_OK)
 def render_ceremony(
     space_id: int,
     db: Session = Depends(get_session),
@@ -75,41 +107,74 @@ def render_ceremony(
 ):
     """Batch-render every ceremony clip for offline fallback.
 
-    For each participant:
-      - ipa = participant.ipa_text or orchestrator.g2p_name(participant.name)
-      - render a WAV clip via Kokoro TTS (from IPA when available, else name)
-      - store the clip and set clip_key
-      - If the final IPA source being used is g2p (TTS fallback), set
-        ipa_source = "g2p" even if the user previously submitted a separate audio clip.
-
-    The g2p + TTS phase runs concurrently in a thread pool; DB writes are serial.
+    Partial success is a success: a participant whose render raises, or whose
+    pronunciation the TTS guard refuses, keeps no clip and is named in the
+    response. Everyone else still gets theirs. Previously one bad name 500'd
+    the batch and persisted nothing.
     """
     _get_space_or_404(db, space_id)
     participants = db.exec(
         select(Participant).where(Participant.space_id == space_id)
     ).all()
+    by_id = {p.id: p for p in participants}
 
-    # Phase 1: parallel g2p + Kokoro render (I/O + CPU bound, GIL-releasing)
-    results: dict[int, bytes] = {}
+    # Phase 1: parallel g2p + Kokoro (I/O + CPU bound, GIL-releasing). Each
+    # future is guarded, so one bad name cannot discard the roster's work.
+    outcomes: dict[int, _Outcome] = {}
+    failures: list[RenderFailure] = []
     with ThreadPoolExecutor(max_workers=_RENDER_WORKERS) as pool:
         futures = {pool.submit(_render_one, p): p.id for p in participants}
         for future in as_completed(futures):
-            p, wav_bytes = future.result()
-            results[p.id] = wav_bytes
+            name = by_id[futures[future]].name
+            try:
+                outcome = future.result()
+            except Exception as e:
+                log.warning(
+                    "render failed for name=%r (%s: %s)", name, type(e).__name__, e,
+                )
+                failures.append(
+                    RenderFailure(name=name, reason=f"{type(e).__name__}: {e}")
+                )
+                continue
+            if outcome.reason:
+                log.warning("render refused for name=%r: %s", name, outcome.reason)
+                failures.append(RenderFailure(name=name, reason=outcome.reason))
+                continue
+            outcomes[outcome.participant_id] = outcome
 
-    # Phase 2: serial DB writes + storage saves
+    # Phase 2: DB writes and storage saves, serial, on the request thread.
+    superseded: list[str] = []
     rendered = 0
     for p in participants:
-        wav_bytes = results[p.id]
+        outcome = outcomes.get(p.id)
+        if outcome is None:
+            continue        # refused or failed -- leave the row exactly as it was
+        if outcome.becomes_g2p:
+            p.ipa_text = outcome.ipa_used
+            p.ipa_source = IPASource.g2p.value
+            p.ipa_confirmed = True
+        p.validate_ipa_invariant()
         if p.clip_key:
-            storage.delete(p.clip_key)
-        clip_key = storage.save(wav_bytes, ext="wav")
-        p.clip_key = clip_key
+            superseded.append(p.clip_key)   # remembered, not deleted yet
+        p.clip_key = storage.save(outcome.wav_bytes, ext="wav")
         db.add(p)
         rendered += 1
 
     db.commit()
-    return {"rendered": rendered}
+
+    # Only now is deleting safe. Before the commit, a dropped connection would
+    # roll back every new clip_key while the old blobs were already gone --
+    # rows pointing at deleted files, which is AUDIT.md §4.3's catastrophe by
+    # another route. After it, the worst case is a leaked blob.
+    for key in superseded:
+        try:
+            storage.delete(key)
+        except Exception as e:
+            log.warning(
+                "superseded clip %r left in storage (%s: %s)", key, type(e).__name__, e,
+            )
+
+    return RenderReport(rendered=rendered, failures=failures)
 
 
 @router.get("/ceremony", response_model=CeremonyData)
