@@ -10,30 +10,94 @@ engine behind it is an implementation detail.
 """
 from __future__ import annotations
 
+import logging
+import threading
+
 from app.pronunciation.gemma import gemma_ipa
 
+log = logging.getLogger(__name__)
+
+DEFAULT_LANGUAGE = "en-us"
+
 # ---------------------------------------------------------------------------
-# Warm instance (loaded once at startup by the orchestrator)
+# Per-language backend cache (warmed at startup by the orchestrator, and
+# lazily on first use)
 # ---------------------------------------------------------------------------
-_backend = None  # type: ignore[var-annotated]
+# An EspeakBackend instance is bound to one language, so a single global
+# cannot serve several. Keyed by espeak language code.
+#
+# Membership means warm() has been attempted; a None value means it was
+# attempted and failed. That negative entry deliberately diverges from
+# tts.synthesize and recognize.recognize, which re-call warm() on every use:
+# constructing a backend costs ~2.3 s — ~1.6 s even when it fails — and g2p
+# runs once per participant, so retrying would cost minutes per render.
+_backends: dict[str, object | None] = {}
+
+# Language codes whose warm failure has been reported, so a batch render
+# produces one line rather than one per participant.
+_warned_warm_failed: set[str] = set()
+
+# The only lock in the codebase, and it guards a C library rather than Python
+# state. espeak-ng keeps its phoneme buffers in library globals -- phonemizer
+# says so itself, and sidesteps it by copying the shared library per wrapper
+# instance (phonemizer/backend/espeak/api.py, EspeakAPI.__init__) -- while
+# _backends deliberately shares ONE instance per language. Under
+# ceremony.py's 4-worker pool that means concurrent phonemize() calls return
+# each other's phonemes, which the renderer then stored and voiced as that
+# person's pronunciation with no failure reported. It is a race, so the rate
+# moves with timing and roster size -- measured anywhere from 52% to 87% of
+# concurrent calls returning the wrong participant's IPA. Never zero.
+#
+# Everywhere else, thread safety here comes from worker purity plus phase
+# separation (see the ceremony.py module docstring). That is still right for
+# the ORM; it simply never covered a C library with global buffers under a
+# pure Python function.
+#
+# Reentrant because espeak_ipa holds it across its lazy warm() call and
+# warm() takes it too. Construction needs the lock in its own right, not
+# merely to avoid duplicated work: EspeakAPI.__init__ loads its own copy of
+# the library and calls espeak_Initialize, so building a backend while
+# another thread is inside phonemize() is itself unsafe.
+_espeak_lock = threading.RLock()
 
 
-def warm() -> None:
-    """Pre-load the phonemizer backend. Called once at app startup.
+def warm(language: str = DEFAULT_LANGUAGE) -> None:
+    """Pre-load the phonemizer backend for one language.
 
-    Gemma is a stateless HTTP call, so there is nothing to warm for it.
+    Called at startup via ``orchestrator.warm_all()`` and lazily by
+    ``espeak_ipa`` on first use. Gemma is a stateless HTTP call, so there is
+    nothing to warm for it.
+
+    Both module containers are mutated in place rather than rebound, so no
+    ``global`` is needed — and so a reset must ``.clear()`` them.
+
+    Takes ``_espeak_lock``: ``EspeakAPI.__init__`` calls ``espeak_Initialize``
+    on its library copy, so constructing a backend while another thread sits
+    inside ``phonemize()`` is unsafe on its own — and two workers racing a
+    cold cache would each pay ~2.3 s to build one that gets discarded.
     """
-    global _backend
-    try:
-        from phonemizer import backend as _b
-        _backend = _b.Backend(
-            language="en-us",
-            backend="espeak",
-            with_stress=True,
-        )
-    except Exception:
-        # espeak-ng / phonemizer not installed — fallback will be used.
-        _backend = None
+    with _espeak_lock:
+        try:
+            from phonemizer.backend import EspeakBackend
+            _backends[language] = EspeakBackend(
+                language=language,
+                with_stress=True,
+            )
+        except Exception as e:
+            # phonemizer absent, espeak-ng not loadable, or an unsupported
+            # language — g2p yields no IPA ("") for this language.
+            _backends[language] = None
+            if language not in _warned_warm_failed:
+                _warned_warm_failed.add(language)
+                # The exception type is the whole diagnosis: ModuleNotFoundError
+                # means phonemizer is absent, RuntimeError means espeak-ng could
+                # not be loaded or the language is not supported.
+                log.warning(
+                    "eSpeak warm failed for language=%r (%s: %s) — g2p will "
+                    "return no IPA, so Prep Clips will refuse names that "
+                    "reach this floor", language, type(e).__name__, e,
+                    exc_info=True,
+                )
 
 
 def g2p(text: str) -> str:
@@ -48,27 +112,57 @@ def g2p(text: str) -> str:
     return gemma_ipa(text) or espeak_ipa(text)
 
 
-def espeak_ipa(text: str) -> str:
+def espeak_ipa(text: str, language: str = DEFAULT_LANGUAGE) -> str:
     """eSpeak NG grapheme-to-phoneme — the fallback floor.
 
-    Produces IPA in the same bracketing/spacing convention the pipeline has
-    always used, so ``gemma_ipa`` is a literal drop-in for this function.
+    Returns **bare** IPA. Slashes are TTS markup, added only at the Kokoro
+    boundary (``tts.py``). When eSpeak cannot help, ``_fallback`` returns ""
+    rather than inventing a pronunciation.
     """
-    if _backend is not None:
-        try:
-            result = _backend.phonemize([text], strip=True)
-            if isinstance(result, list):
-                return result[0].strip()
-            return str(result).strip()
-        except Exception:
-            pass
-    # Fallback: very rough ASCII approximation so the pipeline still works
-    # in environments without espeak-ng (e.g. CI / test).
+    # Serialized: the shared backend's phonemes come out of espeak-ng's
+    # library globals, so two workers calling at once get each other's. See
+    # _espeak_lock. The lock does NOT extend to gemma_ipa -- g2p() calls that
+    # first, and it is an HTTP request that must stay parallel.
+    with _espeak_lock:
+        if language not in _backends:
+            warm(language)                 # lazy self-heal on first use
+        backend = _backends.get(language)
+        if backend is not None:
+            try:
+                result = backend.phonemize([text], strip=True)
+                ipa = (result[0] if isinstance(result, list) else str(result)).strip()
+                if ipa:
+                    return ipa
+                # A blank name phonemizes to "". Worth distinguishing from a
+                # backend failure even though both end at _fallback.
+                log.warning(
+                    "eSpeak returned empty IPA for name=%r language=%r",
+                    text, language,
+                )
+            except Exception as e:
+                log.warning(
+                    "eSpeak phonemize failed for name=%r language=%r (%s: %s)",
+                    text, language, type(e).__name__, e,
+                )
+    # No usable eSpeak result: report no IPA rather than invent one.
     return _fallback(text)
 
 
 def _fallback(text: str) -> str:
-    """Crude placeholder IPA. NOT linguistically accurate — for dev only."""
-    # Just return the text in slashes so it's distinguishable from real IPA.
-    cleaned = text.strip().lower().replace(" ", "_")
-    return f"/{cleaned}/"
+    """No IPA available. Returns "" instead of inventing a pronunciation.
+
+    The empty string is deliberate, not a placeholder; the old
+    ``/name_with_underscores/`` got the spelling read back as phonemes. What
+    "" means depends on the caller: the batch renderer
+    (``ceremony._render_one``) refuses it, so the participant gets no clip and
+    is named in the render report and nothing is written to ``ipa_text``.
+    ``tts.synthesize`` skips the override on an empty value, so a direct call
+    still voices the name with Kokoro's own G2P.
+    """
+    # Per call, deliberately not deduped: this is a real ceremony getting no
+    # pronunciation, so which names it happened to is the whole point.
+    log.warning(
+        "no IPA for name=%r — Prep Clips will refuse it and report the name",
+        text,
+    )
+    return ""

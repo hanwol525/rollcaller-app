@@ -20,6 +20,8 @@ Rules:
 """
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
 from sqlmodel import Session, select
 
@@ -27,6 +29,7 @@ from app.db import get_session
 from app.models import (
     IPAConfirmRequest,
     IPAPreviewRequest,
+    IPASource,
     Participant,
     ParticipantSelf,
     Space,
@@ -34,7 +37,9 @@ from app.models import (
 from app.pronunciation import orchestrator
 from app.storage import storage
 
-router = APIRouter(prefix="/invite", tags=["invite"])
+log = logging.getLogger(__name__)
+
+router =APIRouter(prefix="/invite", tags=["invite"])
 
 
 def _get_participant_or_404(db: Session, token: str) -> Participant:
@@ -56,6 +61,7 @@ def _build_participant_self(db: Session, p: Participant) -> ParticipantSelf:
         space_name=space.name if space else "",
         status=p.status,
         ipa_text=p.ipa_text,
+        ipa_source=p.ipa_source,
         ipa_confirmed=p.ipa_confirmed,
     )
 
@@ -72,12 +78,38 @@ async def upload_recording(
     db: Session = Depends(get_session),
     file: UploadFile = File(...),
 ):
-    """Upload a WAV recording. Stores the blob, runs Allosaurus recognition,
-    sets ipa_text/ipa_source to the recognized IPA, and switches status to
+    """Upload a WAV recording. Stores the blob and switches status to
     'recorded'.
 
-    Per the model invariant, ipa_source='recognized' requires ipa_confirmed=True.
-    The participant can then preview/edit and confirm via the other endpoints.
+    **A recording never replaces a hand-typed pronunciation.** The IPA fields
+    move with provenance, in both directions:
+
+        prior ipa_source | recognition succeeds | recognition yields nothing
+        -----------------+----------------------+--------------------------
+        recognized       | replaced             | cleared
+        manual           | kept                 | kept
+        g2p              | replaced             | kept
+        None             | set to recognized    | stays None
+
+    'recognized' is cleared rather than kept because its provenance *was* the
+    blob this request just deleted, so keeping it would describe a recording
+    that no longer exists. 'g2p' survives because it is derived from the
+    spelling, which this upload did not change, and the next render re-derives
+    it anyway. 'manual' survives both ways: a human typed it on purpose, and a
+    take we could not read is no more consent to discard it than one we could.
+
+    So after this route, ipa_source='recognized' reliably means "derived from
+    the recording currently on file" — it used to be able to describe a blob
+    the same request had deleted.
+
+    Whenever this changes or clears ``ipa_text``, any existing clip is
+    withdrawn (blob deleted after the commit), because it voices the old
+    pronunciation. When ``ipa_text`` is unchanged, the clip stays.
+
+    The upload is never rejected over a failed recognition: the audio is real
+    and the cause is almost always server-side, and the batch renderer falls
+    through to g2p so the ceremony still gets a usable clip. recognize.py logs
+    which of the three reasons it was.
     """
     p = _get_participant_or_404(db, token)
 
@@ -100,14 +132,10 @@ async def upload_recording(
             detail=str(exc),
         )
 
-    # Run audio-to-IPA recognition (Allosaurus) BEFORE saving the blob,
-    # so a recognition failure doesn't leave an orphaned file on disk.
+    # Run audio-to-IPA recognition (wav2vec2). A None result no longer aborts
+    # the upload, so this no longer has to precede the save to avoid orphaning
+    # a blob -- it stays first only because it needs nothing from storage.
     ipa = orchestrator.recognize_recording(wav)
-    if not ipa:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Could not recognize IPA from audio",
-        )
 
     # Store the recording blob (now honestly WAV, not raw browser bytes)
     if p.recording_key:
@@ -115,12 +143,37 @@ async def upload_recording(
     recording_key = storage.save(wav, ext="wav")
     p.recording_key = recording_key
 
-    # Set ipa_text + ipa_source together (they move together).
-    # recognized requires ipa_confirmed=True per the model invariant.
-    p.ipa_text = ipa
-    p.ipa_source = "recognized"
-    p.ipa_confirmed = True
+    # The three fields always move together (invariant Rule 1). See the
+    # decision table in the docstring for why each prior source behaves as it
+    # does.
+    prior_ipa = p.ipa_text
+    if p.ipa_source == IPASource.manual.value:
+        pass                    # a human typed it; a recording never replaces it
+    elif ipa:
+        # recognized requires ipa_confirmed=True per the model invariant.
+        p.ipa_text = ipa
+        p.ipa_source = "recognized"
+        p.ipa_confirmed = True
+    elif p.ipa_source == IPASource.recognized.value:
+        # Its provenance was the blob deleted just above. ipa_confirmed is
+        # reset explicitly because validate_ipa_invariant accepts
+        # (None, None, True) and so cannot catch a stale flag.
+        p.ipa_text = None
+        p.ipa_source = None
+        p.ipa_confirmed = False
+    # else: g2p, or nothing at all, survives -- derived from the spelling,
+    # which this upload did not change.
     p.status = "recorded"
+
+    # A clip voices the pronunciation it was rendered from. If this upload
+    # changed or cleared that pronunciation, the clip now speaks a take that
+    # is no longer on file, so it is withdrawn and the roster reads "Not
+    # prepared" until the next Prep Clips. An unchanged pronunciation (a kept
+    # manual or g2p entry) keeps its clip.
+    stale_clip = None
+    if p.clip_key and p.ipa_text != prior_ipa:
+        stale_clip = p.clip_key
+        p.clip_key = None
 
     # Enforce the invariant explicitly (table models skip Pydantic validators).
     p.validate_ipa_invariant()
@@ -128,6 +181,18 @@ async def upload_recording(
     db.add(p)
     db.commit()
     db.refresh(p)
+
+    # Deleted only after the commit, as in render_ceremony: the row stopped
+    # referencing the key before the commit, so a failed delete leaks a blob
+    # but never leaves a row pointing at a missing file.
+    if stale_clip:
+        try:
+            storage.delete(stale_clip)
+        except Exception as e:
+            log.warning(
+                "orphaned clip %r left in storage (%s: %s)",
+                stale_clip, type(e).__name__, e,
+            )
 
     return _build_participant_self(db, p)
 
@@ -166,8 +231,25 @@ def confirm_ipa(
     Sets ipa_confirmed=True, status=confirmed, clip_key=populated.
     Any human edits to the IPA set ipa_source="manual" except if the change
     is unconfirmed (which leaves the prior source).
+
+    Refuses with 422 when the TTS guard rejects the pronunciation, leaving the
+    row untouched. Confirming is a promise that this pronunciation will be
+    used at the ceremony, and ``tts.synthesize`` would otherwise accept it,
+    clear the override and voice the *spelling* of the name instead -- so the
+    participant would be told they were confirmed, get a clip, and never learn
+    it was unusable. The batch renderer makes the same refusal. Preview
+    deliberately does not: hearing what would happen is what a preview is for.
     """
     p = _get_participant_or_404(db, token)
+
+    # Before any assignment, so a rejection leaves the Session-owned instance
+    # with nothing to roll back.
+    refusal = orchestrator.ipa_refusal(p.name, body.ipa)
+    if refusal:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"That pronunciation cannot be used: {refusal}",
+        )
 
     prior_ipa = p.ipa_text
     prior_source = p.ipa_source

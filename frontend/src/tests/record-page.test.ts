@@ -10,7 +10,7 @@
  */
 
 import { test, expect, describe, vi, afterEach } from 'vitest';
-import { render, cleanup, waitFor } from '@testing-library/svelte';
+import { render, cleanup, waitFor, fireEvent } from '@testing-library/svelte';
 
 // Mock the api module so getSelf returns a participant with IPA data
 vi.mock('$lib/api', () => ({
@@ -28,13 +28,26 @@ vi.mock('$lib/recorder', () => ({
 
 // Import after mocks are set up
 import RecordPage from '../routes/record/[token]/+page.svelte';
-import { getSelf } from '$lib/api';
+import { getSelf, uploadRecording, previewIpa, confirmIpa } from '$lib/api';
+import { startRecording, stopRecording } from '$lib/recorder';
 import type { ParticipantSelf } from '$lib/api';
 
 afterEach(() => {
 	cleanup();
 	vi.clearAllMocks();
 });
+
+// jsdom has no URL.createObjectURL/revokeObjectURL, and its
+// HTMLMediaElement.play is a "not implemented" stub. Without these,
+// handleHearPreview calls previewIpa and then throws on the very next line,
+// which flips `screen` to 'error' and unmounts the review card. The
+// call-argument assertions below would still hold — the call precedes the
+// throw — but they would be asserting through a broken render, and the
+// autoplay setTimeout would outlive the test.
+URL.createObjectURL = (() => 'blob:preview') as typeof URL.createObjectURL;
+URL.revokeObjectURL = (() => {}) as typeof URL.revokeObjectURL;
+HTMLMediaElement.prototype.play = (() =>
+	Promise.resolve()) as typeof HTMLMediaElement.prototype.play;
 
 const SAMPLE_IPA = '/ˈæli/';
 
@@ -45,6 +58,9 @@ function makeSelf(overrides: Partial<ParticipantSelf> = {}): ParticipantSelf {
 		space_name: 'Graduation 2025',
 		status: 'recorded',
 		ipa_text: SAMPLE_IPA,
+		// A row with IPA always has a source. 'recognized' is the one that
+		// means "from the recording currently on file", so it is the default.
+		ipa_source: 'recognized',
 		ipa_confirmed: false,
 		...overrides
 	};
@@ -137,5 +153,213 @@ describe('resumability — refresh mid-flow never resets progress', () => {
 
 		expect(container.textContent).not.toContain('Start Recording');
 		expect(container.textContent).not.toContain('Review your name');
+	});
+});
+// ─ No pronunciation was derived ───────────────────────────────────────────── //
+
+describe('review screen when no pronunciation could be read', () => {
+	test('says so plainly, and offers re-record instead of confirm', async () => {
+		// `recorded` with no IPA is a legal row: the recording was stored but
+		// the recognizer produced nothing. Before this branch existed, the page
+		// showed the full review UI and both Preview and Confirm returned
+		// silently on `if (!ipaText) return;` — a dead end with no message.
+		//
+		// The assertion is positive, unlike the three invariants above: a null
+		// fixture paired with a `not.toContain` is what made the landing-screen
+		// test unfalsifiable (see its comment). Deleting the {:else} branch
+		// fails this test.
+		const self = makeSelf({ status: 'recorded', ipa_text: null });
+		vi.mocked(getSelf).mockResolvedValue(self);
+
+		const { container } = renderRecordPage();
+
+		await waitFor(() => {
+			expect(container.textContent).toContain('Recording saved');
+		});
+
+		expect(container.textContent).toContain('read a pronunciation from it');
+		expect(container.textContent).toContain('Re-record');
+
+		// Nothing to preview and nothing to confirm, so neither control renders.
+		expect(container.textContent).not.toContain('Confirm');
+		expect(container.textContent).not.toContain('Hear your name');
+		expect(container.textContent).not.toContain('Review your name');
+	});
+});
+
+// ─ Re-recording ───────────────────────────────────────────────────────────── //
+
+describe('re-recording', () => {
+	const TAKE_ONE = '/ˈoʊld/';
+	const TAKE_TWO = '/ˈnjuː/';
+
+	/** Drive Re-record → Start Recording → Stop, back to the review screen. */
+	async function reRecord(ui: ReturnType<typeof renderRecordPage>) {
+		const { getByRole } = ui;
+		await fireEvent.click(getByRole('button', { name: 'Re-record' }));
+		await fireEvent.click(getByRole('button', { name: 'Start Recording' }));
+		await waitFor(() => getByRole('button', { name: 'Stop' }));
+		await fireEvent.click(getByRole('button', { name: 'Stop' }));
+	}
+
+	function mockRecorder() {
+		// handleStop guards on `if (!recorder) return;`, and `recorder` is a
+		// plain let, not $state. A bare vi.fn() resolves undefined, which
+		// leaves it falsy and swallows the Stop click silently.
+		vi.mocked(startRecording).mockResolvedValue({} as unknown as MediaRecorder);
+		vi.mocked(stopRecording).mockResolvedValue(new Blob(['audio']));
+	}
+
+	/**
+	 * A GUARD, not a regression test — and the distinction matters.
+	 *
+	 * With $lib/api mocked, the frontend is already correct given the
+	 * backend's response: once a failed re-record clears ipa_text, the {:else}
+	 * branch renders. The defect was entirely in invite.py, and
+	 * test_an_upload_moves_the_ipa_with_its_provenance is what catches it.
+	 * This pins that the branch reads live state rather than anything cached
+	 * at mount. Writing it as a "regression test" would be the unfalsifiable
+	 * shape the landing-screen test above already got caught in.
+	 */
+	test('a re-record that reads nothing lands on "Recording saved"', async () => {
+		vi.mocked(getSelf).mockResolvedValue(makeSelf({ ipa_text: TAKE_ONE }));
+		vi.mocked(uploadRecording).mockResolvedValue(
+			makeSelf({ ipa_text: null, ipa_source: null })
+		);
+		mockRecorder();
+
+		const ui = renderRecordPage();
+		await waitFor(() => {
+			expect(ui.container.textContent).toContain('Review your name');
+		});
+
+		await reRecord(ui);
+
+		await waitFor(() => {
+			expect(ui.container.textContent).toContain('Recording saved');
+		});
+		expect(ui.container.textContent).toContain('read a pronunciation from it');
+		expect(ui.container.textContent).not.toContain('Confirm');
+		// ⭐ still no phonetics, on the screen the previous take's IPA left.
+		expect(ui.container.textContent).not.toContain(TAKE_ONE);
+	});
+
+	/**
+	 * THE regression test, and the one with a live mutation probe.
+	 *
+	 * `ipaText` (+page.svelte:25) is a deliberately non-reactive baton, set
+	 * only in loadSelf and handleStop. Nothing else guards it going stale, so
+	 * if handleStop stops refreshing it, a participant who re-records gets a
+	 * preview — and then a Confirm — of the take they just replaced. Probe:
+	 * deleting `ipaText = self.ipa_text` at +page.svelte:79 leaves the guard
+	 * above passing and fails this one.
+	 */
+	test('"Hear your name" previews the new take, not the previous one', async () => {
+		vi.mocked(getSelf).mockResolvedValue(makeSelf({ ipa_text: TAKE_ONE }));
+		vi.mocked(uploadRecording).mockResolvedValue(makeSelf({ ipa_text: TAKE_TWO }));
+		vi.mocked(previewIpa).mockResolvedValue(new Blob(['wav']));
+		mockRecorder();
+
+		const ui = renderRecordPage();
+		await waitFor(() => {
+			expect(ui.container.textContent).toContain('Review your name');
+		});
+
+		await reRecord(ui);
+		await waitFor(() => {
+			expect(ui.container.textContent).toContain('Review your name');
+		});
+
+		await fireEvent.click(ui.getByRole('button', { name: /Hear your name/ }));
+		await waitFor(() => {
+			expect(previewIpa).toHaveBeenCalled();
+		});
+
+		expect(previewIpa).toHaveBeenCalledWith('test-token-123', TAKE_TWO);
+		expect(previewIpa).not.toHaveBeenCalledWith('test-token-123', TAKE_ONE);
+	});
+
+	test('a kept fallback pronunciation says so instead of claiming the recording was read', async () => {
+		vi.mocked(getSelf).mockResolvedValue(
+			makeSelf({ ipa_text: TAKE_ONE, ipa_source: 'g2p' })
+		);
+
+		const { container } = renderRecordPage();
+		await waitFor(() => {
+			expect(container.textContent).toContain('Review your name');
+		});
+
+		expect(container.textContent).toContain('this is the one already on file');
+		expect(container.textContent).not.toContain(TAKE_ONE);
+	});
+
+	test('a hand-typed pronunciation is not described as unreadable', async () => {
+		vi.mocked(getSelf).mockResolvedValue(
+			makeSelf({ ipa_text: TAKE_ONE, ipa_source: 'manual' })
+		);
+
+		const { container } = renderRecordPage();
+		await waitFor(() => {
+			expect(container.textContent).toContain('Review your name');
+		});
+
+		expect(container.textContent).toContain('pronunciation you entered yourself');
+		// The g2p line would be a lie here: recognition may well have worked.
+		expect(container.textContent).not.toContain("couldn't read a pronunciation");
+	});
+});
+
+// ─ A refused confirmation ─────────────────────────────────────────────────── //
+
+describe('a refused confirmation', () => {
+	/**
+	 * The backend now 422s a pronunciation the ceremony voice cannot use, so
+	 * this path exists for the first time. Writing the reason to `error` would
+	 * replace the whole card with one that has no buttons at all — stranding
+	 * the participant on the only screen that cannot be left, over the one
+	 * problem they could have fixed by recording again.
+	 *
+	 * Probe: setting `error` instead of `confirmError` in handleConfirm's catch
+	 * fails both assertions below.
+	 */
+	test('shows the reason in place and leaves Re-record reachable', async () => {
+		vi.mocked(getSelf).mockResolvedValue(makeSelf({ ipa_text: SAMPLE_IPA }));
+		vi.mocked(confirmIpa).mockRejectedValue(
+			new Error("That pronunciation cannot be used: contains the digit '0'")
+		);
+
+		const { container, getByRole } = renderRecordPage();
+		await waitFor(() => {
+			expect(container.textContent).toContain('Review your name');
+		});
+
+		await fireEvent.click(getByRole('button', { name: 'Confirm' }));
+		await waitFor(() => {
+			expect(container.textContent).toContain('cannot be used');
+		});
+
+		// Still on the review screen, not the dead-end error card.
+		expect(container.textContent).toContain('Review your name');
+		expect(getByRole('button', { name: 'Re-record' })).toBeInTheDocument();
+		// ⭐ and the refusal quotes the IPA back at nobody.
+		expect(container.textContent).not.toContain(SAMPLE_IPA);
+	});
+
+	test('re-recording clears the refusal', async () => {
+		vi.mocked(getSelf).mockResolvedValue(makeSelf({ ipa_text: SAMPLE_IPA }));
+		vi.mocked(confirmIpa).mockRejectedValue(new Error('cannot be used: nope'));
+		vi.mocked(startRecording).mockResolvedValue({} as unknown as MediaRecorder);
+
+		const { container, getByRole } = renderRecordPage();
+		await waitFor(() => {
+			expect(container.textContent).toContain('Review your name');
+		});
+		await fireEvent.click(getByRole('button', { name: 'Confirm' }));
+		await waitFor(() => {
+			expect(container.textContent).toContain('cannot be used');
+		});
+
+		await fireEvent.click(getByRole('button', { name: 'Re-record' }));
+		expect(container.textContent).not.toContain('cannot be used');
 	});
 });

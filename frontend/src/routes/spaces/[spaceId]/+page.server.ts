@@ -16,6 +16,7 @@ id: number; name: string; email: string | null;
 status: string; position: number;
 ipa_text: string | null; ipa_source: string | null; ipa_confirmed: boolean;
 invite_token: string; recording_key: string | null; clip_key: string | null;
+clip_blocked_reason?: string | null;
 }[]>(`/spaces/${spaceId}/participants`, cookies);
 return { space, participants };
 };
@@ -121,10 +122,13 @@ reorder: async ({ request, params, cookies }) => {
 render: async ({ params, cookies }) => {
 const spaceId = parseInt(params.spaceId, 10);
 try {
-const result = await serverFetch<{ rendered: number }>(`/spaces/${spaceId}/render`, cookies, {
+const result = await serverFetch<{
+rendered: number;
+failures: { name: string; reason: string }[];
+}>(`/spaces/${spaceId}/render`, cookies, {
 method: 'POST'
 });
-return { action: 'render', rendered: result.rendered };
+return { action: 'render', rendered: result.rendered, failures: result.failures };
 } catch (e) {
 if (isRedirect(e)) throw e;
 return { action: 'render', error: String(e) };

@@ -12,10 +12,23 @@ Built fast for a hackathon, now being converted into a maintainable portfolio ap
 
 ## Working agreement — read this first
 
-**Han controls all pushes, merges and PRs.** Work on a branch, commit locally, then **stop and
-report**. Do not `git push`, do not merge, do not open or merge a pull request, do not
-force-push, and do not create or delete remote branches — unless explicitly told to in the
-current session. "The work is finished" is not permission to push.
+> **Han owns the git history. Claude Code does not write to git — at all.**
+>
+> Make changes in the working tree and **leave them there, uncommitted and unstaged.** Han
+> reviews, stages, commits and pushes.
+>
+> **Permitted:** `git status`, `git diff`, `git log`, `git show`, `git grep`, `git ls-files`,
+> `git rev-list`, `git merge-base`, `git check-ignore`.
+>
+> **Forbidden** unless Han asks in the current session: `git add`/staging, `commit`, `push`,
+> `stash`, `branch`, `switch`/`checkout`, `merge`, `rebase`, `reset`, `tag`, `revert`,
+> `cherry-pick`, any PR or release operation, and editing anything under `.git/`.
+>
+> None of these is permission to commit: the work being finished; wanting it revertable; wanting
+> a clean tree; wanting to stage it "so it's easier to review"; a brief using numbered units; a
+> previous session having done it. If you believe a commit is necessary, **say so and stop.**
+>
+> Instead of committing, end each unit with a handoff report.
 
 **The code wins.** Where any brief, document, comment or this file contradicts what the code
 demonstrably does, the code is right. Flag the contradiction explicitly, reproduce it, then
@@ -24,7 +37,7 @@ it either. Every significant error in this project has been caught by this rule.
 
 **Work arrives as numbered briefs.** Each brief has a single concern and explicit scope fences.
 Respect them: do not fix things outside the current brief, even when you are looking straight at
-them — note them for the brief that owns them. One concern per commit.
+them — note them for the brief that owns them. One concern per unit.
 
 **Verify a finding before acting on it.** See the reference documents below: not every recorded
 defect has been verified, and acting on an unverified one has already cost a wrong brief.
@@ -66,7 +79,7 @@ The venv lives at **`backend/app/venv`** — not `backend/.venv`. Run backend co
 npm run dev          # Vite dev server on 5173 — the only working front end (see below)
 npm run build        # adapter-node -> build/index.js
 npm run check        # svelte-kit sync && svelte-check
-npm test             # vitest     — 12 tests, green
+npm test             # vitest     — 30 tests (counted, not yet run after the last change)
 npm run test:e2e     # playwright — needs a live backend on :8000 (see Gotchas)
 ```
 
@@ -102,28 +115,50 @@ There is still **no linter and no formatter** — no ruff/black/eslint/prettier 
 ### The pronunciation pipeline
 
 `app/pronunciation/orchestrator.py` is a thin façade over four stages; routers call only the
-façade. Every stage defines a `warm()`, but **only three of the four self-heal on first use** —
-see the known bug below.
+façade. Every stage defines a `warm()`, all four self-heal on first use, and
+`orchestrator.warm_all()` runs from the FastAPI lifespan (`main.py`).
 
 | Stage | Module | Does | Lazy self-heal |
 |---|---|---|---|
 | transcode | `transcode.py` | ffmpeg → canonical 16 kHz mono WAV (browser sends WebM/Opus or MP4/AAC) | ✅ re-probes PATH |
-| recognize | `recognize.py` | wav2vec2 CTC (`facebook/wav2vec2-lv-60-espeak-cv-ft`) audio → IPA | ✅ |
-| g2p | `g2p.py` → `gemma.py` | LLM over an OpenAI-compatible endpoint; the eSpeak fallback below it is **dead code** | 🔴 **none** |
+| recognize | `recognize.py` | wav2vec2 CTC (`facebook/wav2vec2-lv-60-espeak-cv-ft`) audio → IPA, else `None` + a log line | ✅ |
+| g2p | `g2p.py` → `gemma.py` | LLM over an OpenAI-compatible endpoint, with a working eSpeak NG floor beneath it | ✅ per language |
 | tts | `tts.py` | Kokoro 82M, IPA → WAV, using `[name](/ipa/)` pronunciation-override markup | ✅ |
 
-**All audio comes from Kokoro.** eSpeak in this codebase only ever produces IPA *text*, and
-currently never even runs. Robotic output means Kokoro is voicing bad IPA — never that eSpeak
-synthesized something.
+**All audio comes from Kokoro.** eSpeak only ever produces IPA *text* — it does run now, but it
+never synthesizes. Robotic output means Kokoro is voicing bad IPA, never that eSpeak synthesized
+something.
 
-🔴 **Known live bug — `g2p()` returns placeholder pseudo-IPA.** `orchestrator.warm_all()` is
-called by nothing in production (the lifespan runs `init_db()` and `seed_organizer()` only), and
-unlike the other stages `g2p.espeak_ipa()` has **no lazy self-heal** — it checks
-`if _backend is not None` and never calls `warm()`. So `_backend` stays `None` and `g2p("Hannah
-Wolfson")` returns `/hannah_wolfson/`, which Kokoro then reads as phonemes. `g2p.warm()` is dead
-twice over: it calls `phonemizer.backend.Backend`, which does not exist (the class is
-`EspeakBackend`). Fixing the symbol alone changes nothing — `warm_all()` would still never be
-called. See `AUDIT.md` §4.1 (§7-verified).
+**Bare IPA is the storage format — by convention, not by enforcement.** Every *producer*
+(`gemma_ipa`, `espeak_ipa`, `g2p._fallback`) returns IPA with no `/slashes/`, and slashes are Kokoro
+markup added only at the TTS boundary. But `IPAConfirmRequest.ipa` is an unvalidated `str` stored
+verbatim, so a participant confirming `/ˈælɪs/` in ordinary dictionary notation puts wrappers
+straight into the row.
+
+⚠️ So the strip is **load-bearing, and shared** — not "defensive", which this file used to claim.
+It lives in `tts.prepare_ipa()` (`_strip_wrappers` then `_normalise_for_kokoro`), which is pure and
+idempotent, and `tts._reject_reason` runs it on its own input. That is what makes
+`orchestrator.ipa_refusal` and the TTS boundary judge the **same string**: they used to differ, so a
+slash-wrapped script narration passed the renderer's check, reached `synthesize`, was refused
+*there*, and silently degraded to a clip voiced from the spelling — counted in `rendered` with no
+`failures` entry. Enforcing bare IPA on write is still open, and would make the strip redundant
+rather than load-bearing.
+
+✅ **Fixed in Brief 03 — the eSpeak floor works.** It used to return placeholder pseudo-IPA:
+`warm()` called `phonemizer.backend.Backend`, a symbol phonemizer does not export, the
+`AttributeError` was swallowed with no log line, and `espeak_ipa()` had no lazy self-heal — so
+`g2p("Hannah Wolfson")` returned `/hannah_wolfson/` and Kokoro read the spelling as phonemes. Now
+it returns `hˈænə wˈʊlfsən`.
+
+⚠️ `AUDIT.md` §4.1 still describes the old state as live, and §7 holds a **wrong refutation**
+about it — see the corrected row in that ledger. Prefer this file for the g2p path.
+
+When eSpeak genuinely cannot help, the floor returns `""` rather than inventing a pronunciation.
+At the TTS boundary that degrades to Kokoro voicing the name with its own G2P — right for a
+participant previewing their own recording. **The batch renderer refuses it instead**: that
+participant gets no clip and is named in the render response, so the organizer can fix it before
+the ceremony rather than hearing it during one. Constructing an `EspeakBackend` costs ~2.3 s, so
+failures are cached per language rather than retried per name.
 
 ### The IPA invariant
 
@@ -133,17 +168,105 @@ The load-bearing domain rule: a pronunciation's **provenance** matters. `Partici
 
 ⚠️ SQLModel `table=True` models do **not** run `@model_validator` on attribute assignment, so
 this is an explicitly-called method, not a validator. Any route that mutates IPA fields must call
-it before committing. Current call sites: `routers/ceremony.py:65`, `routers/invite.py:126`,
-`routers/invite.py:199`.
+it before committing. Call sites, named by function because the line numbers have now gone stale
+twice: `routers/invite.py::upload_recording`, `routers/invite.py::confirm_ipa`,
+`routers/ceremony.py::render_ceremony` (phase 2).
+
+⚠️ **The invariant is narrower than it looks, and two things it does not catch are load-bearing.**
+It couples only `ipa_text` / `ipa_source` / `ipa_confirmed` and says nothing about `status` or
+about whether a recording still exists. In particular `(None, None, True)` **passes** — a stale
+`ipa_confirmed` beside a null text is legal — so a route that clears IPA must reset all three
+itself. Do not try to express either rule as an invariant rule; they are route-level obligations.
 
 ### Request flow
 
 `POST /invite/{token}/recording` → transcode → recognize → store blob → `status="recorded"`.
+**The blob is stored and the status advances even when recognition yields nothing** — it used to
+raise 422 and throw the recording away, which punished the participant for a missing model. A
+`recorded` row with `ipa_text=None` is legal, and Prep Clips then takes its g2p branch.
+
+**A recording never replaces a hand-typed pronunciation.** The IPA fields move with provenance, in
+both directions, and the route owns the whole table:
+
+| prior `ipa_source` | recognition succeeds | recognition yields nothing |
+|---|---|---|
+| `recognized` | replaced | **cleared**, all three fields |
+| `manual` | **kept** | **kept** |
+| `g2p` | replaced | kept |
+| `None` | set to `recognized` | stays `None` |
+
+`recognized` is cleared rather than kept because its provenance *was* the blob the same request
+deleted — keeping it described a recording that no longer existed, and that is the bug this
+replaced. `g2p` survives because it is derived from the spelling, which an upload does not change.
+`manual` survives both ways: a take we could not read is no more consent to discard a typed
+pronunciation than one we could. The upshot worth relying on: **`ipa_source == "recognized"` means
+"derived from the recording currently on file"**, which it did not before.
+
+**An upload that changes or clears `ipa_text` withdraws the participant's clip**, because that clip
+voices the old pronunciation. Without this, the roster said Ready and `GET /ceremony` served the
+previous take until someone happened to run Prep Clips. The row drops `clip_key` before the commit
+and the blob is deleted after it, the same ordering Prep Clips uses. An unchanged `ipa_text` (a kept
+`manual` or `g2p` entry, or the same IPA read again) keeps its clip.
+
+⚠️ `manual` is currently unreachable from the shipped UI — `confirmIpa` is called from one place
+with `is_edit` hard-coded `false` and the record page has no IPA input — so both halves of that
+carve-out are forward-looking. The participant-facing `ParticipantSelf` therefore carries
+`ipa_source` (provenance, never the IPA text), because the record page has to distinguish "this
+came from your recording" from "this is the pronunciation already on file".
 Preview (`/ipa/preview`) returns raw WAV bytes and **deliberately does not persist** — a real
 product rule, but its only test (`test_preview_does_not_store`) is `@integration`, so since the
-CI gate was deleted it runs nowhere automatically (see Gotchas). `POST /spaces/{id}/render`
-("Prep Clips") batch-renders the roster on a `ThreadPoolExecutor`, with all DB writes and a
-single commit on the request thread.
+CI gate was deleted it runs nowhere automatically (see Gotchas).
+
+`POST /invite/{token}/ipa/confirm` **refuses unusable IPA with a 422 and writes nothing**, checked
+before the first assignment so the row is never partially written. Confirming is a promise that the
+pronunciation reaches the ceremony; without the check, `synthesize` accepted it, cleared the
+override and voiced the *spelling*, so the participant was told they were confirmed, got a clip,
+and only the organizer found out — at Prep Clips, where the renderer refused the very IPA this
+route had just accepted. The participant-facing side of that 422 matters: `confirmIpa` unwraps
+FastAPI's `detail` and the record page renders it **in place**, because the full-screen `error`
+card has no buttons and recording again is the one thing that would help.
+
+`POST /spaces/{id}/render` ("Prep Clips") batch-renders the roster on a `ThreadPoolExecutor` and
+**returns a partial-success report** — `{rendered, failures: [{name, reason}]}` — because one
+unrenderable name must not discard everyone else's clips. The ordering is load-bearing:
+`_render_one` is pure (no ORM writes, since worker threads must not mutate Session-owned
+instances), every write and the single commit happen on the request thread, and a superseded clip
+is deleted **only after that commit**. So the worst a failure can do is leak a blob; it can never
+leave a row pointing at a deleted file. This is the only endpoint in the codebase that reports
+per-item failure — there is no other partial-success convention to match.
+
+**Two classes of blob are orphaned, and they share that one post-commit loop.** A clip superseded by
+a fresh render, and a clip **withdrawn** from a participant the guard refused. The second matters
+because the clip a refused participant holds came from `confirm_ipa`, where `synthesize` degrades
+rather than refuses — so it is a reading of their *spelling*, which `GET /ceremony` went on serving
+while the render report said they had no pronunciation. Clearing it is strictly safer than a
+supersede: the row stops referencing the key before the commit, so even a failed delete leaves no
+dangling reference. **Deleting it inline would break the guarantee** — there is no new key to roll
+back, so it looks harmless, but a commit failure would then roll `clip_key` back to a blob already
+gone. `test_superseded_clips_are_deleted_only_after_the_commit` covers both classes for that reason.
+
+⚠️ **A refusal and a raise are deliberately treated differently.** A refusal is a deterministic
+judgement that will repeat, so the stale clip is actively wrong and goes. A raise is an unknown and
+usually transient — a Kokoro OOM under four workers — and silence at a ceremony is worse than a clip
+that worked on the last run, so a raise keeps its clip. Phase 2 sees both as an absent `outcomes`
+entry, so phase 1 carries the distinction forward in a `refused` set. Provenance is untouched either
+way, so one more Prep Clips is a full recovery. Deleting on both would be the obvious
+simplification; `test_a_render_that_raises_keeps_the_clip_it_already_had` is there to stop it.
+
+⚠️ **Worker purity is not the whole thread-safety story.** It covers the ORM, which is what it was
+written for. What it never covered is a C library with global buffers underneath a pure Python
+function: `_render_one` calls `g2p` → `espeak_ipa`, espeak-ng returns phonemes from library
+globals, and `g2p._backends` deliberately shares one `EspeakBackend` per language. So concurrent
+`phonemize()` calls handed each participant another participant's IPA — measured anywhere from
+52% to 87% of calls under the 4-worker pool (it is a race; the rate moves with timing and roster
+size) — which the renderer then stored with `ipa_source="g2p"`, `ipa_confirmed=True` while
+reporting `failures: []`. **`g2p._espeak_lock` is the only lock in the codebase.** It is a
+`threading.RLock` because `espeak_ipa` holds it across its lazy `warm()` call, and construction
+needs it in its own right: `EspeakAPI.__init__` loads its own copy of the library and calls
+`espeak_Initialize`. It deliberately does **not** cover `gemma_ipa`, which is an HTTP call that
+must stay parallel. This was dormant until Brief 03 fixed the eSpeak floor — `warm()` used to call
+`phonemizer.backend.Backend`, a symbol that package does not export, so `phonemize()` was
+unreachable and the pre-existing pool never touched espeak at all.
 
 Auth is two unrelated schemes: organizer sessions are opaque DB-backed tokens (no JWT, despite
 `pyjwt` being pinned), and participants authenticate purely by possessing an invite token.
@@ -163,6 +286,26 @@ SvelteKit 2 / Svelte 5 runes / TS strict. Two API clients split by trust boundar
 `$lib/server` (`serverFetch`, cookie-forwarding, used by every `+page.server.ts`) and `$lib/api`
 (browser-side, used by the record page and logout).
 
+**`clip_blocked_reason` is computed on every read, never stored** — on both `ParticipantRead` and
+`CeremonyItem`, via `participants._to_read` and `ceremony.get_ceremony`, both calling the same
+`orchestrator.ipa_refusal` the renderer calls. A column would go stale the moment a participant
+re-records, could drift from the renderer's own judgement, and would need an `ALTER TABLE` that
+`db.py`'s bare `create_all` will not do. It **under-reports on purpose**: it never runs g2p, so a
+participant with no stored IPA reads as merely unprepared even if the render would refuse what g2p
+gives them — deriving that per row would be an espeak call per name per page load, now serialised
+behind `g2p._espeak_lock`. A render that *raised* has no row-local signature either. Under-reporting
+is the right direction: the field never claims someone is blocked when they are not. Both read
+models test `ipa_text is not None`, not truthiness, so a stored `""` reads as blocked.
+
+It exists because the render report lives in `form`, which is `null` after any reload and after all
+five redirecting actions — so the roster's **Clip column is the only durable signal**, and it used
+to collapse "refused" and "never prepped" into one `None`. It now has four states: **Ready** /
+**Needs attention** (with the reason in `title`) / **Not prepared** (a pronunciation waiting on a
+render) / **None**. The ceremony page splits the same way: `notPrepped` for a roster nobody has
+prepped, and `nothingUsable` when every clip is missing *and* something was refused — which must
+not tell the organizer to press the button that just finished. That second state only became
+reachable once the renderer started refusing names outright.
+
 ⚠️ **The Vite dev proxy is load-bearing.** Browser-side calls use *relative* paths (`/auth`,
 `/invite/...`, `/media/...`), there are zero `+server.ts` routes, and the backend has no CORS
 middleware. Those paths resolve in dev only because `vite.config.ts` proxies them. **Any deploy
@@ -172,10 +315,65 @@ former GKE setup did this at the nginx ingress. A bare adapter-node deploy with 
 
 ## Gotchas that cost time
 
-- **The local venv is deliberately slim** (Intel Mac — `torch`/`kokoro` have no macOS x86_64
-  wheels past certain versions). Expected local state is **111 passed, 16 skipped, 0 failed**
-  (127 collected): 12 `@integration` tests skip without `kokoro`, 4 transcode tests skip without
-  `ffmpeg`. Treat any *failure* as a regression; the skips are the design.
+- **The local venv is deliberately slim, and on this machine it cannot be otherwise** (Intel
+  x86_64, macOS 12.7.6). `torch`'s last macOS x86_64 wheel is **2.2.2**; later macOS wheels
+  are arm64-only and macOS 14+, and `requirements.txt` pins `torch==2.13.0+cpu`, which has no
+  macOS wheel at all. `kokoro` needs `torch`, so **the 12 `@integration` tests can never run on
+  this Mac** — they need Linux or an arm64 Mac on macOS 14+. Expected local state is **158
+  passed, 15 skipped, 0 failed** (173 collected): 11 skip without `kokoro`, 4 transcode tests
+  skip without `ffmpeg`. Treat any *failure* as a regression; the skips are the design.
+  (The counts stated elsewhere in this file — "the 12 `@integration` tests", "16 of the 127
+  backend tests", "the other 11" — are a census that has gone stale and is fenced to the brief
+  that owns the test files. This line is the measured one.)
+- **In the slim venv a recording produces no IPA at all, and that is now the honest answer.**
+  `recognize()` needs `transformers`, which is absent here, so it returns `None` and logs
+  `wav2vec2 recognizer unavailable (ModuleNotFoundError: ...)` **once per process**. The recording
+  is still stored and the participant still shows `recorded`; Prep Clips falls through to g2p on
+  the spelling. **This is a slim-venv condition, not a production one** — `kokoro` depends on
+  `transformers`, so any environment that can synthesize can also recognize. It is worth knowing
+  because it makes the local app quietly *different from* production rather than broken: every
+  clip you hear locally is g2p-derived, never recording-derived, so you cannot evaluate
+  recognition quality on this machine at all.
+- **`pip install -r app/requirements.txt` does not succeed as written.** The
+  `torch==2.13.0+cpu` pin is a local version PyPI cannot serve, so the install needs
+  `--extra-index-url https://download.pytorch.org/whl/cpu`. That flag lives in
+  `backend/Dockerfile:18` and `README.md:122`, and was also in the deleted `ci.yml`, but it is
+  not in the Commands section above.
+- **A garbage guard sits at the TTS boundary, and it refuses rather than raises.**
+  `tts.py:_reject_reason` rejects IPA that has nothing to voice (empty, wrapper-only like `/ /`,
+  or stress marks only — judged with stress removed, because `synthesize` strips it before
+  building the override), that contains a digit, that is mostly consecutive English
+  letter *names*, or whose token ends in eSpeak's word for "letter" (how it narrates a script it
+  cannot read: 李雷 → `tʃˈaɪniːzlˌɛɾɚ tʃˈaɪniːzlˌɛɾɚ`, "Chinese letter" twice). On a hit it logs
+  and clears the override, so Kokoro voices the plain name via its own G2P. It deliberately does
+  **not** raise; the *routes* decide what a refusal means, via
+  `orchestrator.ipa_refusal`. **The two that make a durable promise both refuse outright:** the
+  batch render names the participant in `failures` and withdraws any clip they held, and
+  `/ipa/confirm` returns **422 and writes nothing**. **Preview still degrades** — hearing what
+  would happen is the whole point of a preview. (Refuse-don't-raise inside `tts.py` used to be
+  justified by `future.result()` being unguarded; that is fixed, but it is still correct, because
+  it is what lets each route pick its own policy.) Both route-level checks and `synthesize` judge
+  the identical string, because `_reject_reason` runs `tts.prepare_ipa` on its own input. Two
+  non-obvious constraints:
+  letter-name IPA is *correct* for initials, so the run
+  must exceed the name's single-character words or "J R R Tolkien" is rejected; and the "letter"
+  check is token-**final**, or `Letterman` → `lˈɛɾɚmən` is rejected. The guard was built against
+  `recognize._fallback`'s fake `rec044`, which reached Kokoro as `[Alice Lee](/rec044/)` through
+  the batch render with no client involvement; that `_fallback` is now deleted, so what the guard
+  actually earns its place against is **real** output — a mis-scripted name from the recognizer or
+  a stray gemma response.
+- **Kokoro's phoneme vocabulary is a closed set of 114 symbols, and anything outside it is
+  dropped silently.** `kokoro/model.py` does
+  `filter(lambda i: i is not None, map(lambda p: self.vocab.get(p), phonemes))` — no unknown
+  token, no error. So an unrenderable symbol does not degrade a clip, it **deletes a sound from
+  it**. The set lives in the model's `config.json` on Hugging Face. What matters at the IPA
+  boundary: the only combining mark in it is **U+0303** (nasalisation); the only precomposed
+  Latin letters are **`ç æ ø œ`**; ASCII **`.`** (the IPA syllable separator) is in it; and every
+  accented Latin letter — `á à â ä å ã é è ê ë í ì î ï ó ò ô ö õ ú ù û ü ñ ý ÿ š ž ł` — is
+  **not**. `tts.py`'s `_normalise_for_kokoro` folds for this and `gemma.py`'s `_GRAPHEME_MAP`
+  maps the leaked graphemes to phonemes the set contains. Both encode a config fetched at
+  runtime, so `test_kokoro_constants_match_published_vocabulary` is what catches drift — it
+  needs only `huggingface_hub`, so it is unmarked and does run here.
 - **Tests needing the real ML stack are marked `@pytest.mark.integration`** plus a `skipif` on
   `kokoro` being importable. The marker lets you deselect by intent (`-m "not integration"`);
   the skipif keeps any kokoro-less machine from erroring.
@@ -210,7 +408,9 @@ former GKE setup did this at the nginx ingress. A bare adapter-node deploy with 
   `*_raises_when_pipeline_unavailable` tests used to pass only because `kokoro` wasn't installed,
   and failed the moment it was. They now force the condition themselves — nulling
   `tts._pipeline` is not enough, because `synthesize()` lazily re-warms at `tts.py:70`, so
-  `tts.warm` is neutered too.
+  `tts.warm` is neutered too. The two recognizer-unavailable tests in `test_models.py` force
+  theirs with `monkeypatch.setitem(sys.modules, "transformers", None)`, which makes the import
+  raise `ModuleNotFoundError` even where `transformers` is installed.
 - **`requirements.txt` is a `pip freeze` at `backend/app/requirements.txt`** — note the path, and
   note it pins both `phonemizer` and `phonemizer-fork` (same import package, non-deterministic
   winner) plus dead deps (`allosaurus`, `pyjwt`) and `pytest` into the production image.
@@ -241,5 +441,5 @@ Prefer `DEPLOY-NOTES.md`, then `AUDIT.md` §7, over the README for anything fact
 
 ---
 
-*This file is living. The test/CI section changes as soon as the test-harness brief lands — update
-it in the same commit rather than leaving it stale.*
+*This file is living. When a brief changes how the repo actually behaves, update this file in
+the same unit rather than leaving it stale.*

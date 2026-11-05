@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import logging
+import re
 import unicodedata
 
 import numpy as np
@@ -40,6 +41,71 @@ def _ascii_fold(s: str) -> str:
     return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii").strip()
 
 
+# Kokoro maps phonemes with `self.vocab.get(p)` and filters out the misses, so
+# a symbol outside its 114-entry vocabulary is dropped **silently** -- it
+# deletes a sound from the clip rather than approximating it. These two sets
+# are the part of that vocabulary which matters when folding IPA, read from
+# the model's config.json. test_kokoro_constants_match_published_vocabulary
+# guards them against drift, because that config is fetched at runtime.
+#
+# Precomposed letters Kokoro accepts whole. NFD would split each into a base
+# plus a combining mark the vocabulary lacks -- that is how `ç` became `c`.
+_KOKORO_PRECOMPOSED = frozenset("çæøœ")
+# The only combining mark in the vocabulary: nasalisation.
+_KOKORO_COMBINING = frozenset("\u0303")
+
+
+def _normalise_for_kokoro(ipa: str) -> str:
+    """Fold IPA to symbols Kokoro's vocabulary can actually voice.
+
+    Keeps anything Kokoro accepts whole; otherwise decomposes and keeps the
+    base plus any combining mark it accepts. So `ç` and a nasal tilde survive,
+    while an acute accent is folded to its base vowel instead of deleting
+    that vowel from the audio.
+    """
+    out: list[str] = []
+    for ch in ipa:
+        if ch in _KOKORO_PRECOMPOSED:
+            out.append(ch)
+            continue
+        for part in unicodedata.normalize("NFD", ch):
+            if not unicodedata.combining(part) or part in _KOKORO_COMBINING:
+                out.append(part)
+    return "".join(out)
+
+
+def _strip_wrappers(ipa: str) -> str:
+    """Drop Kokoro's own markup from an IPA string.
+
+    Slashes and brackets are notation at the TTS boundary, not storage format
+    -- but they arrive anyway. ``IPAConfirmRequest.ipa`` is an unvalidated
+    ``str`` stored verbatim, so a participant confirming ``/ˈælɪs/`` in
+    ordinary dictionary notation puts wrappers straight into the row.
+    Enforcing bare-IPA-on-write is a later brief; this copes with what is
+    there.
+    """
+    return ipa.strip().strip("/[]").strip()
+
+
+def prepare_ipa(ipa: str) -> str:
+    """The exact string the guard judges and Kokoro voices. Pure, idempotent.
+
+    Factored out because the renderer and this module used to judge two
+    *different* strings. ``ceremony.py`` handed ``orchestrator.ipa_refusal``
+    the raw stored value, so ``[ˈeɪ bˈiː]`` and ``/tʃˈaɪniːzlˌɛɾɚ/`` passed
+    its check -- the second being the exact script narration the guard exists
+    for. ``synthesize`` then stripped the wrappers, refused the result,
+    cleared the override and voiced the plain name, while the render report
+    said ``failures: []``. ``_reject_reason`` runs this itself now, so no
+    caller can judge an unprepared string.
+
+    Measured when it landed: of the inputs checked, only wrapped garbage
+    changed verdict. Wrapped *valid* IPA -- ``/bˈɑːb/``, ``/ˈælɪs/``, the old
+    storage format -- is unaffected, so no existing row regresses.
+    """
+    return _normalise_for_kokoro(_strip_wrappers(ipa))
+
+
 def _kokoro_wav(source: str) -> bytes | None:
     """Run one Kokoro pass on `source`; return WAV bytes, or None if no audio."""
     parts = []
@@ -52,6 +118,90 @@ def _kokoro_wav(source: str) -> bytes | None:
     buf = io.BytesIO()
     sf.write(buf, audio, _KOKORO_SAMPLE_RATE, format="WAV")
     return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Garbage guard
+# ---------------------------------------------------------------------------
+# eSpeak narrates instead of pronouncing when it cannot read a name: it spells
+# the letters out, names the script, or reads digits aloud. Kokoro would voice
+# any of that confidently at a graduation, so none of it may become a
+# pronunciation override.
+#
+# Both sets are a snapshot of what espeak-ng 1.52.0 produces;
+# test_garbage_guard_constants_match_espeak re-derives them and pins the
+# engine version, so a drift shows up as an engine move rather than as a
+# mysterious mismatch.
+_DIGIT_RE = re.compile(r"\d")
+
+# The IPA espeak gives for each English letter *name* ("A" -> ˈeɪ, "G" -> dʒˈiː).
+_LETTER_NAMES = frozenset({
+    "ˈeɪ", "bˈiː", "sˈiː", "dˈiː", "ˈiː", "ˈɛf", "dʒˈiː", "ˈeɪtʃ", "ˈaɪ",
+    "dʒˈeɪ", "kˈeɪ", "ˈɛl", "ˈɛm", "ˈɛn", "ˈoʊ", "pˈiː", "kjˈuː", "ˈɑːɹ",
+    "ˈɛs", "tˈiː", "jˈuː", "vˈiː", "dˈʌbəljˌuː", "ˈɛks", "wˈaɪ", "zˈiː",
+})
+
+# espeak's own word "letter", in both stress variants. It lands token-final
+# when espeak names a script it cannot read, e.g. 李雷 phonemises to
+# "tʃˈaɪniːzlˌɛɾɚ tʃˈaɪniːzlˌɛɾɚ" — "Chinese letter", twice.
+_NARRATION_MARKERS = frozenset({"lˈɛɾɚ", "lˌɛɾɚ"})
+
+
+def _reject_reason(name: str, ipa: str) -> str | None:
+    """Why this IPA must not reach Kokoro, or None when it is usable.
+
+    Returns a sentence rather than a bool so the caller can log *which* rule
+    fired — the failure modes need different fixes.
+
+    Prepares its own input, deliberately: every rule here is about what Kokoro
+    will actually voice, so judging anything other than ``prepare_ipa``'s
+    output is judging a string that will never be spoken. Doing it inside
+    rather than asking callers to means a new caller cannot get it wrong.
+    Idempotent, so a caller that already prepared loses nothing.
+    """
+    ipa = prepare_ipa(ipa)
+
+    # Nothing left to voice. Judged with stress marks and whitespace removed,
+    # because synthesize strips stress before building the override: "", "/ /"
+    # and a lone "ˈ" all survive prepare_ipa yet leave Kokoro reading the
+    # spelling -- and confirm_ipa would have stored them as confirmed.
+    if not ipa.replace("ˈ", "").replace("ˌ", "").split():
+        return "it contains no phonemes to voice"
+
+    found = _DIGIT_RE.search(ipa)
+    if found:
+        return f"contains the digit {found.group(0)!r}, which Kokoro reads aloud"
+
+    tokens = ipa.split()
+
+    # Letter-name IPA is *correct* when the name contains initials, so the run
+    # is only suspicious when it outruns them: "J R R Tolkien" legitimately
+    # phonemises to three letter names, while "Nguyễn" phonemises to four and
+    # has no initials at all.
+    initials = sum(
+        1 for word in name.replace("-", " ").replace(".", " ").split()
+        if len(word) == 1
+    )
+    longest = run = 0
+    for token in tokens:
+        run = run + 1 if token in _LETTER_NAMES else 0
+        longest = max(longest, run)
+    if longest >= 2 and longest > initials:
+        return (
+            f"{longest} consecutive letter names against {initials} initials "
+            "in the name, so eSpeak spelled it out instead of pronouncing it"
+        )
+
+    # Token-final only: a real surname can *start* with the same phonemes --
+    # "Letterman" is lˈɛɾɚmən -- and must not be rejected for it.
+    for token in tokens:
+        if any(token.endswith(marker) for marker in _NARRATION_MARKERS):
+            return (
+                f"token {token!r} ends in eSpeak's word for \"letter\", so it "
+                "named the script instead of pronouncing the name"
+            )
+
+    return None
 
 
 def synthesize(text: str, ipa: str | None = None) -> bytes:
@@ -75,11 +225,26 @@ def synthesize(text: str, ipa: str | None = None) -> bytes:
 
     attempts: list[str] = []
     if ipa:
-      bare_ipa = ipa.strip().strip("/[]").strip()  # gemma_ipa returns /.../ — strip to bare
-      bare_ipa = bare_ipa.lstrip("ˈˌ")
-      bare_ipa = bare_ipa.replace(" ˈ", " ").replace(" ˌ", " ")
-      if bare_ipa:
-          attempts.append(f"[{text}](/{bare_ipa}/)")  # faithful IPA — override pronunciation
+        stripped = _strip_wrappers(ipa)
+        bare_ipa = _normalise_for_kokoro(stripped)
+        if bare_ipa != stripped:
+            # Conditional on purpose: a clean IPA must log nothing, which
+            # test_synthesize_logs_when_ipa_is_folded asserts directly.
+            log.warning(
+                "IPA folded to Kokoro's vocabulary for name=%r: %r -> %r",
+                text, stripped, bare_ipa,
+            )
+        refusal = _reject_reason(text, bare_ipa)
+        if refusal:
+            log.warning(
+                "IPA refused for name=%r: %s. Kokoro will voice the name "
+                "directly instead (ipa=%r)", text, refusal, bare_ipa,
+            )
+            bare_ipa = ""        # falls through to the plain-name attempt below
+        bare_ipa = bare_ipa.lstrip("ˈˌ")
+        bare_ipa = bare_ipa.replace(" ˈ", " ").replace(" ˌ", " ")
+        if bare_ipa:
+            attempts.append(f"[{text}](/{bare_ipa}/)")  # faithful IPA — override pronunciation
     attempts.append(text)  # plain name — Kokoro's own G2P
     folded = _ascii_fold(text)
     if folded and folded != text:

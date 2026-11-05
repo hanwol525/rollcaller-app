@@ -136,12 +136,46 @@ describe('not-prepped gate', () => {
 	test('shows the gate message when all clips are null', () => {
 		const ceremony = makeCeremony({
 			roster: [
-				{ position: 1, name: 'Alice', clip_url: null, ipa_text: SAMPLE_IPA, ipa_source: 'g2p' }
+				{
+					position: 1,
+					name: 'Alice',
+					clip_url: null,
+					ipa_text: SAMPLE_IPA,
+					ipa_source: 'g2p',
+					// Explicit: the gate is now conditional on nothing being
+					// refused, so leaving this absent would let the test keep
+					// passing for a reason its name no longer states.
+					clip_blocked_reason: null
+				}
 			]
 		});
 		const { getByText } = renderCeremony(ceremony);
 
 		expect(getByText(/Clips haven't been prepared yet/)).toBeInTheDocument();
+	});
+
+	test('a roster where every name was refused is not told to prepare clips', () => {
+		// Reachable for the first time: the renderer refuses a name outright
+		// rather than voicing its spelling, so a whole roster can come back
+		// with nothing. Sending the organizer to press the button that just
+		// completed is the failure this branch exists to prevent.
+		const ceremony = makeCeremony({
+			roster: [
+				{
+					position: 1,
+					name: '李雷',
+					clip_url: null,
+					ipa_text: 'tʃˈaɪniːzlˌɛɾɚ',
+					ipa_source: 'g2p',
+					clip_blocked_reason: 'token ends in eSpeak\'s word for "letter"'
+				}
+			]
+		});
+		const { getByText, queryByText } = renderCeremony(ceremony);
+
+		expect(queryByText(/Clips haven't been prepared yet/)).not.toBeInTheDocument();
+		expect(getByText(/No clips are available/)).toBeInTheDocument();
+		expect(getByText(/Needs attention/)).toBeInTheDocument();
 	});
 
 	test('does not show the gate when at least one clip exists', () => {

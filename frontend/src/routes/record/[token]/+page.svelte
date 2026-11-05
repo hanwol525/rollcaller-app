@@ -22,6 +22,11 @@ let micError = $state('');
 	let previewLoading = $state(false);
 	let previewUrl = $state<string | null>(null);
 	let confirming = $state(false);
+// Kept apart from `error` on purpose. `error` replaces the whole screen with
+// a card that has no way back, which is right for a dead invite link and
+// wrong for a refused pronunciation — the participant needs Re-record to
+// still be there.
+let confirmError = $state('');
 let ipaText: string | null = null; // the hidden IPA baton
 
 // Re-record override: when true, show the recorder regardless of status
@@ -113,11 +118,15 @@ previewLoading = false;
 
 async function handleConfirm() {
 if (!ipaText) return;
+confirmError = '';
 confirming = true;
 try {
 self = await confirmIpa(token, ipaText, false);
 } catch (e) {
-error = String(e).replace('Error: ', '');
+// In place, never the full-screen `error`. The backend refuses a
+// pronunciation the ceremony voice cannot use (422), and the one thing
+// the participant can do about it is record again.
+confirmError = String(e).replace('Error: ', '');
 } finally {
 confirming = false;
 }
@@ -128,6 +137,7 @@ if (previewUrl) { URL.revokeObjectURL(previewUrl); }
 previewUrl = null;
 reRecording = true;
 micError = '';
+confirmError = '';
 }
 </script>
 
@@ -155,8 +165,27 @@ micError = '';
 {:else if screen === 'review'}
 <div class="card review">
 <p class="event-name">{self?.space_name}</p>
+{#if self?.ipa_text}
 <h1>Review your name</h1>
 <p class="subtitle">Hi {self?.name}, listen to how your name will be pronounced at the ceremony.</p>
+
+<!--
+	A pronunciation only reaches this screen from the current recording when
+	ipa_source is "recognized" — the upload route guarantees that. The other
+	two sources mean this take produced nothing usable (g2p) or that a
+	pronunciation the participant typed was deliberately kept (manual), and
+	saying so is the difference between a stale screen and an honest one.
+	Still no IPA text: the label is provenance, never phonetics.
+-->
+{#if self?.ipa_source === 'g2p'}
+<p class="notice">
+We couldn't read a pronunciation from your recording, so this is the one already on file for you.
+</p>
+{:else if self?.ipa_source === 'manual'}
+<p class="notice">
+This is the pronunciation you entered yourself. Your recording has been saved.
+</p>
+{/if}
 
 {#if micError}
 <p class="error-msg">{micError}</p>
@@ -173,6 +202,10 @@ micError = '';
 
 <p class="hint">This is the AI ceremony voice rendering your pronunciation — not your own recording.</p>
 
+{#if confirmError}
+<p class="error-msg">{confirmError}</p>
+{/if}
+
 <div class="actions">
 <button onclick={handleConfirm} disabled={confirming} class="btn-primary">
 {confirming ? 'Confirming…' : 'Confirm'}
@@ -181,6 +214,24 @@ micError = '';
 Re-record
 </button>
 </div>
+{:else}
+<h1>Recording saved</h1>
+<p class="subtitle">Thanks {self?.name} — we've kept your recording.</p>
+<p class="error-msg">
+We couldn't read a pronunciation from it, so the ceremony will use a standard
+reading of your name. You can record again if you'd like to try.
+</p>
+
+{#if micError}
+<p class="error-msg">{micError}</p>
+{/if}
+
+<div class="actions">
+<button onclick={handleReRecord} class="btn-secondary">
+Re-record
+</button>
+</div>
+{/if}
 </div>
 
 {:else if screen === 'recording'}
@@ -412,5 +463,15 @@ padding: 0.8rem;
 border-radius: 8px;
 font-size: 0.9rem;
 margin: 0;
+}
+
+/* Not an error — the ceremony is still covered, so it must not read like one. */
+.notice {
+background: #f3f1ec;
+color: #5f5c55;
+padding: 0.8rem;
+border-radius: 8px;
+font-size: 0.9rem;
+margin: 0 0 1.25rem;
 }
 </style>

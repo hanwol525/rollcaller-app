@@ -15,7 +15,15 @@
 
 	const currentItem = $derived(roster[currentIndex] ?? null);
 	const isFinished = $derived(currentIndex >= roster.length);
-	const notPrepped = $derived(roster.length > 0 && roster.every((r) => r.clip_url === null));
+	// A roster with no clips at all now means one of two different things,
+	// because the renderer refuses names outright rather than voicing their
+	// spelling: either nobody has pressed Prep Clips, or it ran and had
+	// nothing it was willing to voice. Telling the organizer to press the
+	// button that just finished is the failure this split exists to avoid.
+	const noClips = $derived(roster.length > 0 && roster.every((r) => r.clip_url === null));
+	const blockedCount = $derived(roster.filter((r) => r.clip_blocked_reason != null).length);
+	const notPrepped = $derived(noClips && blockedCount === 0);
+	const nothingUsable = $derived(noClips && blockedCount > 0);
 
 	// Initialize the audio element's src once when the roster loads.
 	// After that, goTo() owns src — this effect must not fire again.
@@ -128,7 +136,17 @@
 		<h1>{ceremony.space_name}</h1>
 	</div>
 
-	{#if notPrepped}
+	{#if nothingUsable}
+		<div class="gate">
+			<p>No clips are available for this event.</p>
+			<p>
+				{blockedCount} of {roster.length} names have no pronunciation we can voice —
+				look for <strong>Needs attention</strong> in the roster's Clip column.
+				Preparing clips again will not produce audio for them.
+			</p>
+			<a href="/spaces/{ceremony.space_id}" class="btn-primary">Back to Roster</a>
+		</div>
+	{:else if notPrepped}
 		<div class="gate">
 			<p>Clips haven't been prepared yet.</p>
 			<p>Go back to the roster and click <strong>Prep Clips</strong> to render audio for the ceremony.</p>

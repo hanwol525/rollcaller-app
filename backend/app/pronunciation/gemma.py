@@ -11,9 +11,18 @@ Config is environment-only (``GEMMA_BASE_URL`` / ``GEMMA_MODEL`` /
 """
 from __future__ import annotations
 
+import logging
 import re
 
 from app.config import settings
+
+log = logging.getLogger(__name__)
+
+# Set once each condition has been reported. Both are process-lifetime facts,
+# identical on every call, and g2p runs once per participant in a batch
+# render, so reporting per call would be N copies of a single line.
+_warned_unconfigured = False
+_warned_no_httpx = False
 
 
 # ---------------------------------------------------------------------------
@@ -55,37 +64,71 @@ _FENCE_RE = re.compile(r"```[^\n]*")  # strip ```lang fences (opening + closing)
 _SLASH_RE = re.compile(r"/([^/\n]+)/")
 _BRACKET_RE = re.compile(r"\[([^\]\n]+)\]")
 _LABEL_RE = re.compile(r"^\s*[A-Za-z]{1,20}:\s*", re.IGNORECASE)
-_PUNCT_RE = re.compile(r"[.,?!;:]")
-# Common English words that should never appear in bare IPA output. IPA uses
-# non-ASCII vowels, so ASCII-only word patterns are prose.
+# ASCII sentence punctuation. The period is exempt unless whitespace follows
+# it: "ˈmɑːkɪs.ˈdʒuːniə" uses it as the IPA syllable separator, and U+002E is
+# in Kokoro's vocabulary, so a bare period is legitimate input.
+_PUNCT_RE = re.compile(r"[,?!;:]|\.(?=\s)")
+# Words that never appear as a complete IPA transcription of a name. One match
+# is enough to call the whole candidate prose.
 _PROSE_RE = re.compile(
     r"\b(the|for|this|output|pronunciation|language|name|ipa|phonetic|"
     r"alphabet|given|its|are|you|your|please|following|would|should|"
     r"only|slashes|brackets|explanation|characters|single|best|with|"
     r"from|that|which|not|but|have|has|will|can|about|into|after|"
-    r"before|personal|international|transcription|engine|is|of|to|"
-    r"in|it|as|be|an|or|no|so|do|go|he|we|me|my|us|am|if|up|at|by)\b",
+    r"before|personal|international|transcription|engine)\b",
+    re.IGNORECASE,
+)
+# The two-letter words from that same list, split out because each is also
+# plausible complete IPA for a short name -- "no", "me", "it". Every IPA
+# symbol is a \w character (even ˈ and ː), so \b fires only at the string
+# ends, which means one of these matching is not evidence of prose. Two
+# distinct ones, or one alongside prose structure (a space), is.
+_AMBIGUOUS_RE = re.compile(
+    r"\b(no|so|do|go|he|we|me|my|us|am|if|up|at|by|is|of|to|"
+    r"in|it|as|be|an|or)\b",
     re.IGNORECASE,
 )
 
 _MAX_IPA_LEN = 80  # implausibly long for a single name's IPA
 
+# Precomposed spelling letters that leak into the model's IPA, mapped to the
+# phoneme each denotes. Every target is verified present in Kokoro's
+# vocabulary, so none of them is silently dropped at synthesis.
+#
+# Deliberately not mapped: Polish ś/ć/ż only make sense as a set with ź -> ʑ,
+# and ʑ is NOT in Kokoro's vocabulary, so mapping three of the four would
+# leave an inconsistent gap. The vowel umlauts (ü ö å) have language-dependent
+# values, and folding them to their base vowel is already a fair approximation.
+_GRAPHEME_MAP = {
+    "ł": "w",  "Ł": "w",     # Polish l-stroke
+    "ñ": "ɲ",  "Ñ": "ɲ",     # Spanish/Galician/Basque palatal nasal
+    "š": "ʃ",  "Š": "ʃ",     # Czech/Slovak/Croatian/Baltic/Finnish
+    "ž": "ʒ",  "Ž": "ʒ",
+    "č": "tʃ", "Č": "tʃ",
+}
+
+
 def _strip_leaked_graphemes(text: str) -> str:
-    """Remove source-spelling letters that leak into Gemma's IPA.
+    """Map source-spelling letters that leak into the model's IPA.
 
-    Gemma sometimes emits a raw grapheme instead of a phoneme — Polish `ł`,
-    an acute-accented `á` — which Kokoro can't parse and mangles. Map the
-    precomposed offenders to their nearest phoneme, then strip combining
-    diacritics (spelling accents, nasal tildes, tie bars) Kokoro's English
-    voice can't render. Real IPA symbols (ʃ ʒ ɔ ɐ ʐ …) are single codepoints
-    with no combining marks, so they pass through untouched.
+    Gemma sometimes emits a raw grapheme instead of a phoneme. Each one in
+    ``_GRAPHEME_MAP`` becomes the phoneme it denotes; everything else is left
+    exactly as it is.
+
+    This used to NFD-decompose and drop every combining mark, justified by
+    "Real IPA symbols are single codepoints with no combining marks, so they
+    pass through untouched". Kokoro's published vocabulary settles that: `ç`
+    (U+00E7) decomposed to `c` + cedilla and shipped as a bare `c`, a
+    different phoneme, and nasalised vowels lost their tilde -- yet `ç` and
+    U+0303 are both symbols Kokoro accepts. Folding to what Kokoro can
+    actually voice now happens at the TTS boundary, where that knowledge
+    belongs.
     """
-    import unicodedata
-    text = text.replace("ł", "w").replace("Ł", "w")   # Polish ł = /w/
-    decomposed = unicodedata.normalize("NFD", text)
-    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    for grapheme, phoneme in _GRAPHEME_MAP.items():
+        text = text.replace(grapheme, phoneme)
+    return text
 
-def _sanitize_ipa(raw: str) -> str | None:
+def _sanitize_ipa(raw: str, name: str | None = None) -> str | None:
     """Clean model output to bare IPA, or ``None`` if implausible.
 
     Steps:
@@ -101,8 +144,11 @@ def _sanitize_ipa(raw: str) -> str | None:
     Does **not** delete ASCII letters -- half the IPA inventory is ASCII
     (p t k m n s f b d g l w j h z v r). The guard is prompt discipline +
     wrapper stripping + the plausibility check, not character-class deletion.
+
+    ``name`` labels the log lines only; it does not affect the result.
     """
     if not raw:
+        log.warning("Gemma IPA rejected for name=%r: empty model output", name)
         return None
 
     text = raw
@@ -138,14 +184,41 @@ def _sanitize_ipa(raw: str) -> str | None:
 
     # 6. Plausibility check -> reject to None.
     if not text:
+        log.warning(
+            "Gemma IPA rejected for name=%r: nothing left after cleaning "
+            "(raw=%.120r)", name, raw,
+        )
         return None
     if len(text) > _MAX_IPA_LEN:
+        log.warning(
+            "Gemma IPA rejected for name=%r: %d chars exceeds the %d-char "
+            "ceiling (text=%.120r)", name, len(text), _MAX_IPA_LEN, text,
+        )
         return None
     # ASCII sentence punctuation anywhere -> prose contamination.
-    if _PUNCT_RE.search(text):
+    m = _PUNCT_RE.search(text)
+    if m:
+        log.warning(
+            "Gemma IPA rejected for name=%r: ASCII sentence punctuation %r "
+            "(text=%r)", name, m.group(0), text,
+        )
         return None
-    # Embedded common English words -> prose contamination.
-    if _PROSE_RE.search(text):
+    # An unambiguous prose word -> contamination. One match is enough.
+    m = _PROSE_RE.search(text)
+    if m:
+        log.warning(
+            "Gemma IPA rejected for name=%r: prose word %r matched (text=%r)",
+            name, m.group(0), text,
+        )
+        return None
+    # Two-letter words prove nothing on their own -- each is plausible short
+    # IPA. Two distinct ones, or one plus prose structure, does.
+    ambiguous = {w.lower() for w in _AMBIGUOUS_RE.findall(text)}
+    if len(ambiguous) >= 2 or (ambiguous and " " in text):
+        log.warning(
+            "Gemma IPA rejected for name=%r: reads as prose, short words %s "
+            "(text=%r)", name, sorted(ambiguous), text,
+        )
         return None
 
     return text
@@ -161,11 +234,26 @@ def gemma_ipa(name: str) -> str | None:
     on missing config, not on network error, not on timeout, not on empty or
     implausible output.
     """
+    global _warned_unconfigured, _warned_no_httpx
+
     base_url = settings.gemma_base_url
     model = settings.gemma_model
     api_key = settings.gemma_api_key
     # If any of the three is unset -> None immediately (-> eSpeak floor).
     if not base_url or not model or not api_key:
+        if not _warned_unconfigured:
+            _warned_unconfigured = True
+            unset = [
+                env for env, value in (
+                    ("GEMMA_BASE_URL", base_url),
+                    ("GEMMA_MODEL", model),
+                    ("GEMMA_API_KEY", api_key),
+                ) if not value
+            ]
+            log.warning(
+                "Gemma not configured (unset: %s) — using the eSpeak floor",
+                ", ".join(unset),
+            )
         return None
 
     url = base_url.rstrip("/") + "/chat/completions"
@@ -193,25 +281,45 @@ def gemma_ipa(name: str) -> str | None:
     try:
         import httpx
     except ImportError:
-      return None
+        if not _warned_no_httpx:
+            _warned_no_httpx = True
+            log.warning("httpx not installed — using the eSpeak floor")
+        return None
 
     try:
         with httpx.Client(timeout=30.0) as client:
             resp = client.post(url, json=payload, headers=headers)
         if resp.status_code != 200:
+            # Status and url only — `headers` carries the bearer token.
+            log.warning(
+                "Gemma HTTP %s from %s — using the eSpeak floor (body=%.200r)",
+                resp.status_code, url, resp.text,
+            )
             return None
         data = resp.json()
         content = data["choices"][0]["message"]["content"]
-    except Exception:
+    except Exception as e:
         # Any failure (network, timeout, JSON parse, missing field) -> None.
+        # The type is what separates them: ReadTimeout, ConnectError,
+        # JSONDecodeError and KeyError are four different operational faults.
+        log.warning(
+            "Gemma request failed (%s: %s) — using the eSpeak floor",
+            type(e).__name__, e,
+        )
         return None
 
     if not content:
+        log.warning(
+            "Gemma returned empty content for name=%r — using the eSpeak floor",
+            name,
+        )
         return None
 
-    bare = _sanitize_ipa(content)
+    bare = _sanitize_ipa(content, name=name)
     if bare is None:
+        # No log here: _sanitize_ipa already reported the specific reason.
         return None
-    # Wrap in the same /.../ bracketing convention the eSpeak path produces
-    # (see _fallback / espeak_ipa), so gemma_ipa is a literal drop-in.
-    return f"/{bare}/"
+    # Bare IPA is the storage format; slashes are TTS markup, added only at
+    # the Kokoro boundary (tts.py). This is what _SYSTEM and _FEWSHOT above
+    # already ask the model for, and what _sanitize_ipa already returns.
+    return bare

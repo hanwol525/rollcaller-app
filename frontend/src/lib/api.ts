@@ -6,6 +6,8 @@ export interface ParticipantSelf {
 	space_name: string;
 	status: ParticipantStatus;
 	ipa_text: string | null;
+	// Provenance, not phonetics. Optional so existing fixtures keep type-checking.
+	ipa_source?: string | null;
 	ipa_confirmed: boolean;
 }
 
@@ -15,6 +17,10 @@ export interface CeremonyItem {
 	clip_url: string | null;
 	ipa_text: string | null;
 	ipa_source: string | null;
+	// Why Prep Clips will refuse this name, or null. Computed server-side, so
+	// it tracks the stored pronunciation instead of going stale. Optional so
+	// existing fixtures keep type-checking.
+	clip_blocked_reason?: string | null;
 }
 
 export interface CeremonyData {
@@ -48,6 +54,25 @@ export async function previewIpa(token: string, ipa: string): Promise<Blob> {
 	return res.blob();
 }
 
+/**
+ * FastAPI puts its reason in `{"detail": "..."}`. Confirm can now be refused
+ * with a 422 whose detail is written for the participant, so showing the raw
+ * body would put `422: {"detail":"..."}` on their screen.
+ *
+ * Deliberately not used by `getSelf`: the record page matches on the status
+ * code inside that message to recognise a dead invite link.
+ */
+async function errorMessage(res: Response): Promise<string> {
+	const text = await res.text();
+	try {
+		const detail = JSON.parse(text)?.detail;
+		if (typeof detail === 'string') return detail;
+	} catch {
+		// Not JSON — fall through to the raw body.
+	}
+	return `${res.status}: ${text}`;
+}
+
 export async function confirmIpa(
 	token: string,
 	ipa: string,
@@ -58,7 +83,7 @@ export async function confirmIpa(
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ ipa, is_edit: isEdit })
 	});
-	if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
+	if (!res.ok) throw new Error(await errorMessage(res));
 	return res.json();
 }
 

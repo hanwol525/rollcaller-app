@@ -33,7 +33,7 @@ class ParticipantStatus(str, Enum):
 
 class IPASource(str, Enum):
     g2p = "g2p"              # grapheme-to-phoneme (Espeak NG / phonemizer)
-    recognized = "recognized"  # audio-to-IPA (Allosaurus)
+    recognized = "recognized"  # audio-to-IPA (wav2vec2)
     manual = "manual"        # human-edited IPA
 
 
@@ -170,6 +170,10 @@ class ParticipantRead(SQLModel):
     invite_token: str
     recording_key: Optional[str]
     clip_key: Optional[str]
+    # Computed per read, never stored — see participants._to_read for why.
+    # Why Prep Clips will refuse this participant, or None. Lets the roster
+    # tell "nobody has prepped yet" from "we tried and will not voice this".
+    clip_blocked_reason: Optional[str] = None
 
 
 class ParticipantSelf(SQLModel):
@@ -179,6 +183,11 @@ class ParticipantSelf(SQLModel):
     space_name: str          # name of the space/event, for participant screens
     status: ParticipantStatus
     ipa_text: Optional[str]
+    # Provenance, not phonetics: the record page needs it to tell "this came
+    # from your recording" from "this is the pronunciation already on file",
+    # which is reachable since a recording no longer replaces a manual one.
+    # The IPA *text* still never reaches the participant's screen.
+    ipa_source: Optional[str]
     ipa_confirmed: bool
 
 
@@ -200,6 +209,9 @@ class CeremonyItem(SQLModel):
     clip_url: Optional[str]
     ipa_text: Optional[str]
     ipa_source: Optional[str]
+    # As on ParticipantRead: computed, so the player can distinguish a roster
+    # nobody has prepped from one where every name was refused.
+    clip_blocked_reason: Optional[str] = None
 
 
 class CeremonyData(SQLModel):
@@ -207,3 +219,21 @@ class CeremonyData(SQLModel):
     space_name: str
     advanced_seconds: int
     roster: list[CeremonyItem]
+
+
+class RenderFailure(SQLModel):
+    """One participant who came out of a batch render with no clip."""
+    name: str
+    reason: str
+
+
+class RenderReport(SQLModel):
+    """Result of a batch render.
+
+    `failures` is empty on a clean run. It is a 200 body rather than an error
+    detail because a partial render is a partial success -- and because the
+    frontend's serverFetch flattens any non-2xx body into an opaque string,
+    so an HTTPException detail could not be read structurally.
+    """
+    rendered: int
+    failures: list[RenderFailure] = []

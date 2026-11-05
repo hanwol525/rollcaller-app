@@ -40,10 +40,15 @@
 	<form method="POST" action="?/render" class="render-form">
 		<button type="submit" class="btn-primary">Prep Clips</button>
 		{#if form?.action === 'render'}
-			{#if form.rendered !== undefined}
-				<span class="success">Prepared {form.rendered} clip(s).</span>
-			{:else if form.error}
+			{#if form.error}
 				<span class="error">{form.error}</span>
+			{:else if form.failures?.length}
+				<span class="warn"
+					>Prepared {form.rendered} clip(s). No new clip for {form.failures.length}:
+					{form.failures.map((f) => `${f.name} (${f.reason})`).join('; ')}</span
+				>
+			{:else if form.rendered !== undefined}
+				<span class="success">Prepared {form.rendered} clip(s).</span>
 			{/if}
 		{/if}
 	</form>
@@ -99,6 +104,7 @@
 				<th>Name</th>
 				<th>Email</th>
 				<th>Status</th>
+				<th>Clip</th>
 				<th>Invite Link</th>
 				<th>Reorder</th>
 				<th></th>
@@ -111,6 +117,27 @@
 					<td>{p.name}</td>
 					<td class="email">{p.email ?? '—'}</td>
 					<td><span class="badge badge-{p.status}">{statusLabels[p.status]}</span></td>
+					<td>
+						<!--
+							Four durable states, all derived from the response. This column
+							is the only signal that survives a reload — the render report
+							lives in `form`, which is null after one, and after every
+							redirecting action. "Needs attention" is the one that was
+							missing: without it a refused participant was indistinguishable
+							from one nobody had prepped yet.
+						-->
+						{#if p.clip_key}
+							<span class="badge badge-confirmed">Ready</span>
+						{:else if p.clip_blocked_reason}
+							<span class="badge badge-blocked" title={p.clip_blocked_reason}>
+								Needs attention
+							</span>
+						{:else if p.ipa_text}
+							<span class="badge badge-invited">Not prepared</span>
+						{:else}
+							<span class="badge badge-invited">None</span>
+						{/if}
+					</td>
 					<td>
 						<button onclick={() => copyLink(p.invite_token)} class="copy-btn">
 							{copiedToken === p.invite_token ? 'Copied!' : 'Copy Link'}
@@ -302,6 +329,11 @@
 		font-size: 0.85rem;
 	}
 
+	.warn {
+		color: #a05a00;
+		font-size: 0.85rem;
+	}
+
 	.empty {
 		text-align: center;
 		padding: 3rem;
@@ -367,6 +399,12 @@
 	.badge-confirmed {
 		background: #d4f0d4;
 		color: #2a7a2a;
+	}
+
+	/* Amber, not red: the ceremony still runs, this one name just needs a look. */
+	.badge-blocked {
+		background: #faecd0;
+		color: #8a5a1a;
 	}
 
 	.copy-btn {
