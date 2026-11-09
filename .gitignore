@@ -224,3 +224,11 @@ backend-app-dump/
 # frontend/src/lib/ and left the frontend unbuildable).
 /AUDIT.md
 /model-swap-check/
+
+# RollCaller — pronunciation eval harness (Brief 04a). Anchored per the note
+# above. `runs/` is raw per-name engine output and `.cache/` is the downloaded
+# dataset (CC BY-SA 4.0, not ours to redistribute); both are reproducible from
+# `results/`'s provenance headers. `results/` is deliberately NOT ignored —
+# the committed summaries are the point of the harness.
+/backend/eval/runs/
+/backend/eval/.cache/

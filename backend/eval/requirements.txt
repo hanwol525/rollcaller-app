@@ -1,0 +1,22 @@
+# Pronunciation eval harness (Brief 04a) — NOT part of the app.
+#
+# Install into the app venv, from backend/:
+#   ./app/venv/bin/python -m pip install -r eval/requirements.txt
+#
+# Deliberately NOT added to app/requirements.txt: backend/Dockerfile:20 copies
+# only app/, and that file is already a pip freeze shipping dead deps into the
+# production image. Keep eval's deps out of it.
+
+panphon==0.22.2          # same pin app/requirements.txt:74 already carries
+wordfreq==3.1.1          # P12: latest at 2026-11-05; pinned so buckets are reproducible
+huggingface_hub==1.23.0  # match the app's; already satisfied in this venv
+
+# --- pins-to-hold: not ours, but we must not move them ---------------------
+# panphon requires numpy and pandas with no upper bound. numpy is pinned at
+# 1.26.4 across the app (app/requirements.txt:71) and tts.py imports it at
+# module level, so an incidental upgrade to the 2.x line would be an app
+# change made by an eval install. Pinning both here makes that impossible
+# rather than merely unlikely; the gate is the app suite, which must still
+# read 182 passed / 15 skipped after this install.
+numpy==1.26.4
+pandas==3.0.6
