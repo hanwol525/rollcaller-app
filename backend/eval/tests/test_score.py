@@ -1,6 +1,8 @@
 """The scorer. Offline apart from one clearly-marked drift detector."""
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from eval.tests._deps import HF_HUB_AVAILABLE, PANPHON_AVAILABLE
@@ -478,3 +480,50 @@ class TestPublishedVocabulary:
         # ...and the vocabulary holds symbols that are not IPA at all.
         from eval.kokoro_vocab import NON_IPA_IN_VOCAB
         assert NON_IPA_IN_VOCAB <= vocab, sorted(NON_IPA_IN_VOCAB - vocab)
+
+
+class TestNothingIsAcceptedAndSilentlyDropped:
+    """Two structural guards against one mistake that has now happened twice:
+    a field added to a signature or a dataclass and never carried through, so
+    the report prints 0 or — for a figure that was correctly computed
+    upstream. Both failures were invisible except by reading the output.
+    """
+
+    def test_every_score_row_parameter_reaches_the_row(self, vocab):
+        """Every keyword `score_row` accepts must be observable on what it
+        returns. A parameter accepted and dropped is worse than one that does
+        not exist: the caller believes it was recorded."""
+        import inspect
+
+        from eval.score import RowScore, score_row
+        params = inspect.signature(score_row).parameters
+        fields = {f.name for f in dataclasses.fields(RowScore)}
+        # `references` and `vocab` are inputs to the computation, not data
+        # the row carries; everything else must be reflected.
+        inputs = {"references", "vocab"}
+        missing = sorted(set(params) - fields - inputs)
+        assert not missing, (
+            f"score_row accepts {missing} and RowScore has no field for them, "
+            "so they are silently discarded."
+        )
+
+    def test_the_branch_survives_into_the_cell(self, vocab):
+        from eval.score import score_row, summarise
+        rows = [
+            score_row("Alice", "it", "today", "ˈalitʃe", ("ˈalitʃe",), vocab,
+                      branch="llm_accepted"),
+            score_row("Bob", "it", "today", "bob", ("bob",), vocab,
+                      branch="llm_rejected", branch_reason="reads as prose"),
+        ]
+        cell = summarise(rows)[("it", "today")]
+        assert cell.branches == {"llm_accepted": 1, "llm_rejected": 1}
+        assert cell.branch_reasons == {"reads as prose": 1}
+
+    def test_the_espeak_engines_carry_no_branch(self, vocab):
+        """`floor` makes no LLM call, so an empty Counter is the honest
+        answer -- not a zero count for branches that never applied."""
+        from eval.score import score_row, summarise
+        cell = summarise([
+            score_row("Alice", "it", "floor", "ˈalitʃe", ("ˈalitʃe",), vocab),
+        ])[("it", "floor")]
+        assert cell.branches == {}

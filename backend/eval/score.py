@@ -18,6 +18,11 @@ Four measured quantities per language and engine, per the brief:
   unrenderable phoneme does not degrade a clip, it deletes a sound from it.
 * **Characters dropped** -- characters surviving normalisation that panphon
   cannot segment, spaces excluded.
+* **Narration tripwires** -- a language-switch flag in the output, and
+  phonemizer's own word-count-mismatch warning (Amendment F). The second is
+  recorded at generate time because it comes from a log record, not from the
+  string. Both under-report in the same direction as the guard does: a
+  narration that comes back as one unspaced token trips neither.
 
 **The error figure is not a rate and does not run 0 to 1.** A complete miss
 costs a flat **7.25 per reference segment** (measured: identical for a 5-, 8-
@@ -58,8 +63,16 @@ BOOTSTRAP_RESAMPLES = 1000
 CONFIDENCE = 0.95
 
 # Measured under panphon 0.22.2: distance("", ref) / len(segs(ref)), constant
-# across every reference tried. The self-check asserts it, so a panphon change
-# that moved the scale cannot pass unnoticed.
+# across every reference tried.
+#
+# ⚠️ The self-check asserts this constant, but it is a **weaker** backstop than
+# it looks and must not be relied on as a panphon-drift detector. 7.25 is the
+# *sum* of panphon's 22 feature weights, while a substitution costs only the
+# differing features' weights -- so a release that redistributed weight across
+# the same 22 features would hold the ceiling at 7.25 and move every error
+# figure. The self-check's one substitution pair is asserted as 0 < x < 1 and
+# currently measures 0.25, so it would accept a 4x change in substitution cost.
+# What actually pins the scale is `panphon_version` in provenance.
 MISS_CEILING_PER_SEGMENT = 7.25
 
 _ft = None
@@ -160,6 +173,15 @@ class RowScore:
     chars_dropped: int
     dropped_chars: str
     has_language_switch_flag: bool
+    # From a phonemizer log record at generate time, not from the output
+    # string, so it is carried through rather than derived (Amendment F).
+    word_count_mismatch: bool = False
+    # `today` only (Amendment B), decided at generate time from the wrapper's
+    # return value. Carried, never derived: the output alone cannot say
+    # whether it came from the LLM or from the eSpeak floor beneath it, and
+    # that distinction is the whole reason `today` is a separate engine.
+    branch: str | None = None
+    branch_reason: str | None = None
 
     @property
     def voiced(self) -> bool:
@@ -173,6 +195,9 @@ def score_row(
     output: str,
     references: tuple[str, ...],
     vocab: frozenset[str],
+    word_count_mismatch: bool = False,
+    branch: str | None = None,
+    branch_reason: str | None = None,
 ) -> RowScore:
     """Score one engine's single output against every attested variant.
 
@@ -227,6 +252,8 @@ def score_row(
         kokoro_per_segment=kokoro_per_segment,
         chars_dropped=dropped_count, dropped_chars=dropped,
         has_language_switch_flag=flagged,
+        word_count_mismatch=word_count_mismatch,
+        branch=branch, branch_reason=branch_reason,
     )
 
 
@@ -274,9 +301,34 @@ class Cell:
     kokoro_mean: float | None = None
     kokoro_ci: tuple[float | None, float | None] = (None, None)
     ceiling_mean: float | None = None
+    # The worst single name, and how many rows beat their own ceiling. Both
+    # exist so a summary can state a worked example that is true of the run
+    # it sits above: the mean alone cannot, and a cell whose *mean* is under
+    # the ceiling can still hold rows far above it (measured: 103 of 5014 dev
+    # rows exceed theirs, across 7 of 16 cells, but only 2 cells have a mean
+    # above it).
+    raw_max: float | None = None
+    raw_max_name: str | None = None
+    n_over_ceiling: int = 0
     chars_dropped_per_name: float | None = None
     dropped_histogram: Counter = field(default_factory=Counter)
     n_language_switch_flags: int = 0
+    n_word_count_mismatch: int = 0
+    # `today` only; empty for the eSpeak engines, which make no LLM call.
+    branches: Counter = field(default_factory=Counter)
+    branch_reasons: Counter = field(default_factory=Counter)
+    # Per language, not per engine: the mean over this language's shared raw
+    # set of the *best* engine for each name. Repeated on every cell of the
+    # language because a Cell is the only thing the report receives.
+    #
+    # This is the real bound, and `oracle` is not one. `oracle` is eSpeak
+    # handed the dataset's `lang`, which the card defines as the Wiktionary
+    # pronunciation section a row was mined from -- not the name's origin and
+    # not necessarily the best voice for it. So a language identifier that
+    # answers "en" for a name sitting in the French section can beat `oracle`
+    # with the same phonemizer, and on the dev split it does in 5 of 8
+    # languages (54 of 2,507 names; `fr` by 19.3% of its headroom).
+    lang_per_name_best: float | None = None
 
     @property
     def refusal_rate(self) -> float | None:
@@ -338,6 +390,20 @@ def summarise(rows: list[RowScore]) -> dict[tuple[str, str], Cell]:
             if all(p[e].voiced for e in engines)
         }
 
+        # The best a per-name engine choice could do on the shared raw set.
+        per_name_best = [
+            min(vals)
+            for per_engine in complete
+            if next(iter(per_engine.values())).name in raw_names
+            and (vals := [
+                per_engine[e].raw_per_segment for e in engines
+                if per_engine[e].raw_per_segment is not None
+            ])
+        ]
+        best_mean = (
+            sum(per_name_best) / len(per_name_best) if per_name_best else None
+        )
+
         for engine in engines:
             subset = [r for r in lang_rows if r.engine == engine]
             cell = Cell(lang=lang, engine=engine, n_names=len(subset),
@@ -350,6 +416,21 @@ def summarise(rows: list[RowScore]) -> dict[tuple[str, str], Cell]:
             cell.n_language_switch_flags = sum(
                 1 for r in subset if r.has_language_switch_flag
             )
+            cell.n_word_count_mismatch = sum(
+                1 for r in subset if r.word_count_mismatch
+            )
+            # Which branch each `today` row took. Without this the headline
+            # question -- does `oracle` beat `today`? -- is unreadable: a
+            # `today` column that is 90% llm_error is a measurement of the
+            # client, not of the model, and the two look identical in the
+            # error figure because both fall back to the same eSpeak floor.
+            cell.branches = Counter(
+                r.branch for r in subset if r.branch is not None
+            )
+            cell.branch_reasons = Counter(
+                r.branch_reason for r in subset if r.branch_reason is not None
+            )
+            cell.lang_per_name_best = best_mean
             cell.chars_dropped_per_name = (
                 sum(r.chars_dropped for r in subset) / len(subset)
             )
@@ -364,6 +445,18 @@ def summarise(rows: list[RowScore]) -> dict[tuple[str, str], Cell]:
             if raw_values:
                 cell.raw_mean = sum(raw_values) / len(raw_values)
                 cell.raw_ci = bootstrap_ci(raw_values)
+                scored = [
+                    r for r in subset
+                    if r.name in raw_names and r.raw_per_segment is not None
+                ]
+                worst = max(scored, key=lambda r: r.raw_per_segment)
+                cell.raw_max = worst.raw_per_segment
+                cell.raw_max_name = worst.name
+                cell.n_over_ceiling = sum(
+                    1 for r in scored
+                    if r.ceiling_per_segment is not None
+                    and r.raw_per_segment > r.ceiling_per_segment
+                )
                 ceilings = [
                     r.ceiling_per_segment for r in subset
                     if r.name in raw_names and r.ceiling_per_segment is not None
