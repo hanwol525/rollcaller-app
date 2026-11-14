@@ -199,8 +199,9 @@ def cmd_probe(args: argparse.Namespace) -> int:
     invisible from inside the app's path -- and those are exactly what decide
     whether a model needs a thinking-off configuration at all.
 
-    **Covered by the paid-run gate as an explicit exemption:** one to four
-    requests of roughly 100 input tokens each, a small fraction of a cent.
+    **Covered by the paid-run gate as an explicit exemption:** one request,
+    or five with ``--levers`` (as-shipped plus the four candidates), each of
+    roughly 100 input tokens, a small fraction of a cent.
     """
     if args.levers and args.extra_payload:
         # The first attempt in a --levers sweep is the as-shipped baseline
@@ -449,6 +450,60 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_paired(args: argparse.Namespace) -> int:
+    """Pure. Re-scores the run file; never calls an engine.
+
+    Separate from `score` because the paired figure is per engine *pair*,
+    not per cell, so it has nowhere to live in the scores JSON without a
+    format change. Keeping it a command means the number in a summary can be
+    reproduced rather than retyped -- which is the failure this is for.
+    """
+    from eval import kokoro_vocab, paired, runfile, score
+
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    vocab, revision = kokoro_vocab.fetch(str(CACHE_DIR))
+    print(f"kokoro vocabulary: {len(vocab)} symbols @ {revision[:8]}",
+          file=sys.stderr)
+
+    try:
+        run = runfile.read(args.run)
+    except runfile.RunFileError as e:
+        print(f"\nBAD RUN FILE\n{e}", file=sys.stderr)
+        return 1
+
+    if args.engines:
+        engine_a, _, engine_b = args.engines.partition(",")
+        if not engine_b:
+            print("\n--engines takes two, comma-separated, e.g. oracle,today",
+                  file=sys.stderr)
+            return 2
+        pairs = [(engine_a.strip(), engine_b.strip())]
+    else:
+        present = sorted(run.engines)
+        pairs = [(a, b) for i, a in enumerate(present) for b in present[i + 1:]]
+
+    scored = [
+        score.score_row(
+            name=r.name, lang=r.lang, engine=r.engine, output=r.output or "",
+            references=tuple(r.references), vocab=vocab,
+        )
+        for r in run.rows
+    ]
+
+    out = []
+    for engine_a, engine_b in pairs:
+        missing = [e for e in (engine_a, engine_b) if e not in run.engines]
+        if missing:
+            print(f"\n{', '.join(missing)} not in this run file "
+                  f"(has {list(run.engines)})", file=sys.stderr)
+            return 1
+        out.append(paired.render(
+            paired.paired_differences(scored, engine_a, engine_b)))
+
+    print("\n\n".join(out))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m eval",
@@ -493,6 +548,15 @@ def main(argv: list[str] | None = None) -> int:
                      help="write Markdown here instead of stdout")
     rep.add_argument("--title", default="Pronunciation baseline")
     rep.set_defaults(func=cmd_report)
+
+    par = sub.add_parser(
+        "paired",
+        help="per-name paired difference between two engines, with a CI")
+    par.add_argument("--run", required=True,
+                     help="a JSONL run file from `generate`")
+    par.add_argument("--engines", default=None, metavar="A,B",
+                     help="the two to compare (default: every pair present)")
+    par.set_defaults(func=cmd_paired)
 
     pro = sub.add_parser(
         "probe",

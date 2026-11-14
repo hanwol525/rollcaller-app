@@ -17,11 +17,12 @@ corpus that makes a number mean less than it looks:
   construction and `wordfreq` returns 0.0 for anything absent from running
   text, so `rare` mostly means `not in running text`.
 * The error figure is **not a rate and is unbounded above**. A complete miss
-  — saying nothing — costs a flat ~7.25 per reference segment, and that is
+  -- saying nothing -- costs a flat ~7.25 per reference segment, and that is
   what the `ceiling` column reports. It is a reference point, **not a
   maximum**: an output *longer* than the reference costs more, because every
-  extra segment is an insertion. Measured on the dev split, 103 of 5,014
-  scored rows exceed their own ceiling.
+  extra segment is an insertion. A figure *above* the ceiling therefore means the
+  engine said far too much; the rendered report counts those names for the
+  run in hand rather than quoting a remembered one.
 """
 from __future__ import annotations
 
@@ -68,7 +69,9 @@ def _worst_example(cells: dict) -> str:
     worst = max(over, key=lambda c: c.raw_max)
     total = sum(c.n_over_ceiling for c in over)
     return (
-        f"In this run {total} name(s) exceed their own ceiling. The worst is "
+        f"In this run {total} name-and-engine row(s) exceed their own "
+        f"ceiling — a name counted once per engine that over-produces for "
+        f"it, since `n_over_ceiling` is per cell. The worst is "
         f"`{worst.raw_max_name}` under `{worst.lang}`/`{worst.engine}` at "
         f"{worst.raw_max:.3f} against a ceiling of {worst.ceiling_mean:.2f} — "
         f"{worst.raw_max / worst.ceiling_mean:.1f}x the cost of saying nothing."
@@ -326,12 +329,16 @@ def render(prov, cells: dict, header: dict, title: str = "Pronunciation baseline
                 "- **Standing in for a segment, it costs the maximum.** The reference",
                 "  segment it should have matched is left unmatched, so the distance",
                 "  charges a full 7.25 deletion where a wrong-but-readable phoneme",
-                "  would have cost ~0.25. German is this case almost every time: en-us",
+                "  would have cost a fraction of it. German is this case almost every",
+                "  time: en-us",
                 "  eSpeak writes `-er` as `ɚ` and the German reference writes `ɐ`, a",
                 "  near-perfect match scored as a total miss (`ˈɛkɚt` vs `ˈɛkɐt`:",
-                "  1.812, not 0.000). Making `ɚ` readable moves `de`/`floor` down, with",
-                "  47 of 50 affected names improving — so the floor is **punished**",
-                "  here and the headroom **overstated**.",
+                "  1.8125 per segment, where a readable-but-wrong vowel such as `ɪ`",
+                "  would have cost 0.1875). So wherever this column is non-empty for",
+                "  `floor`, the floor is **punished** and the headroom **overstated**.",
+                "  How much is not derivable here: this renderer sees only cells, so a",
+                "  count of affected names would be a number it cannot measure. Re-score",
+                "  the rows if you need one.",
                 "- **Appended where the reference has nothing, it is free.** That is the",
                 "  minority case, and it is what happens inside narration, where losing",
                 "  one segment out of thirty-four helps.",

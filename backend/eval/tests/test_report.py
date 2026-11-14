@@ -108,11 +108,15 @@ class TestAboveCeilingIsCountedPerName:
     """`ceiling` is the cost of saying *nothing*, not a maximum: an output
     longer than the reference exceeds it without bound.
 
-    The count is per **name**, not per cell mean, because a cell can look
+    The marker is per **name**, not per cell mean, because a cell can look
     unremarkable on its mean and still hold names far above the ceiling.
     Measured on dev: 103 of 5,014 rows exceed theirs, spread over 7 of 16
     cells, but only 2 cells have a *mean* above it — so a mean-driven marker
     left 36 over-ceiling names in cells it presented as fine.
+
+    The run-level *total*, though, is a count of rows rather than names:
+    `n_over_ceiling` is per cell and the renderer sums it, so a name counts
+    once per engine that over-produces for it.
     """
 
     def test_the_over_ceiling_names_are_counted_and_marked(self):
@@ -146,8 +150,25 @@ class TestAboveCeilingIsCountedPerName:
         out = render({("ar", "floor"): cell("ar", "floor", raw_mean=48.8,
                                             raw_max=74.3, raw_max_name="إيثار",
                                             n_over_ceiling=57)})
-        assert "`إيثار`" in out and "74.300" in out and "57 name(s)" in out
+        assert ("`إيثار`" in out and "74.300" in out
+                and "57 name-and-engine row(s)" in out)
         assert "48.8 against a ceiling" not in out
+
+    def test_the_total_is_rows_not_names_because_cells_can_share_a_name(self):
+        """`n_over_ceiling` is per cell, so summing it counts a name once per
+        engine that over-produces for it. Measured on the `test` split: the
+        renderer's total is 113 against 112 distinct names, because one `fr`
+        name exceeds its ceiling under both `floor` and `oracle`. Saying
+        "name(s)" overstated the names by exactly that one.
+        """
+        out = render({
+            ("fr", "floor"): cell("fr", "floor", raw_mean=2.5, raw_max=9.0,
+                                  raw_max_name="Ange", n_over_ceiling=5),
+            ("fr", "oracle"): cell("fr", "oracle", raw_mean=0.6, raw_max=8.0,
+                                   raw_max_name="Ange", n_over_ceiling=9),
+        })
+        assert "14 name-and-engine row(s)" in out
+        assert "14 name(s)" not in out
 
     def test_it_says_so_plainly_when_nothing_exceeds_its_ceiling(self):
         out = render({("it", "floor"): cell("it", "floor")})
@@ -289,3 +310,64 @@ class TestShape:
 
     def test_it_renders_with_no_cells_at_all_rather_than_raising(self):
         assert "## Provenance" in render({})
+
+
+class TestTheRendererNeverQuotesAMeasurementItCannotSee:
+    """`report.py` once stamped a remembered row count into every report.
+
+    The sentence read "Making `ɚ` readable moves `de`/`floor` down, with 47 of
+    50 affected names improving". That figure came from the *dev* split and was
+    hard-coded in the prose, so the `test`-split summary carried it too -- where
+    the true figure is 54 of 59. The renderer cannot even compute it: it is
+    handed ``Cell`` objects and never sees a row, so any per-name count in its
+    static prose is by construction a number from somewhere else.
+
+    This guards the class rather than the instance. Every number in a prose
+    literal must be one of the constants below, each allowed for a stated
+    reason; anything else fails and has to justify itself or be computed from
+    the cells.
+    """
+
+    #: value -> why a literal is allowed to say it
+    ALLOWED = {
+        "7.25": "MISS_CEILING_PER_SEGMENT, a scorer constant",
+        "114": "the size of Kokoro's closed vocabulary, asserted by its own test",
+        "1.8125": "distance('ɛkɚt','ɛkɐt') per segment -- two fixed strings",
+        "0.1875": "distance('ɛkɪt','ɛkɐt') per segment -- two fixed strings",
+        "0.0": "the value wordfreq returns for a token absent from running text",
+        "1.01": "quoted verbatim from the dataset card",
+        "2.47": "quoted verbatim from the dataset card",
+        "56": "Polish's share of the corpus; the *rendered* share is computed",
+        "112": "a source line reference, g2p.py:112",
+        "04": "a brief number, Brief 04",
+    }
+
+    def test_every_number_in_a_prose_literal_is_an_allowed_constant(self):
+        import ast
+        import re
+        from pathlib import Path
+
+        src = Path(report.__file__).read_text(encoding="utf-8")
+        # standalone numbers only: the "2" in `g2p` is an identifier, not a
+        # measurement, so a digit touching a letter does not count.
+        number = re.compile(r"(?<![0-9A-Za-z])\d+(?:[.,]\d+)?(?![0-9A-Za-z])")
+        offenders = []
+        for node in ast.walk(ast.parse(src)):
+            if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+                continue
+            if len(node.value) < 8:  # format fragments, not prose
+                continue
+            for match in number.finditer(node.value):
+                if match.group() not in self.ALLOWED:
+                    offenders.append((node.lineno, match.group(), node.value[:70]))
+        assert not offenders, (
+            "a prose literal in report.py quotes a number that is not a known "
+            "constant -- if it is a measurement, compute it from the cells "
+            f"instead of writing it down: {offenders}"
+        )
+
+    def test_the_vocabulary_aside_states_the_direction_without_a_row_count(self):
+        out = render({("de", "floor"): cell("de", "floor",
+                                            dropped_histogram=Counter({"ɚ": 60}))})
+        assert "**punished**" in out and "**overstated**" in out
+        assert "affected names improving" not in out
