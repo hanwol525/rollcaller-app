@@ -18,4 +18,12 @@ Run from ``backend/``, always::
 ``settings.storage_fs_root`` at import time (config.py:58-59), which resolves
 against the process CWD, so importing the app from anywhere else scatters a
 stray ``blobstore/``.
+
+The one side effect of importing this package is pinning phonemizer to the
+espeak-ng bundled in the venv -- see ``espeak_setup``. It runs here, and not
+in a submodule, because ``eval.dataset`` imports ``app.pronunciation.g2p`` at
+module level and the pin has to precede the first backend construction.
 """
+from eval.espeak_setup import pin_bundled_espeak
+
+pin_bundled_espeak()

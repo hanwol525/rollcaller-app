@@ -1,0 +1,11 @@
+# Committed eval summaries are read as diffs, so their line endings must not
+# depend on who checked them out. Git for Windows' installer defaults
+# core.autocrlf to true, which would rewrite these to CRLF on checkout and
+# show every line as changed on the next commit. core.autocrlf is unset on the
+# machine this was added from, so the hazard is latent rather than live here.
+#
+# Deliberately narrow: the repo has 20+ unanchored .gitignore patterns and no
+# line-ending policy anywhere else, and choosing one for the whole polyglot
+# tree is not this brief's call. Only the files whose diffs are the deliverable
+# are pinned.
+backend/eval/results/*.md text eol=lf

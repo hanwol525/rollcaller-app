@@ -186,10 +186,15 @@ class TestG2pFallsBackWhenGemmaUnavailable:
         monkeypatch.delenv("GEMMA_BASE_URL", raising=False)
         monkeypatch.delenv("GEMMA_MODEL", raising=False)
         monkeypatch.delenv("GEMMA_API_KEY", raising=False)
-        # Reload settings so the unset env is reflected.
+        # `_env_file=None` is load-bearing, not tidiness. `delenv` unsets the
+        # environment but not the dotenv *source*, so a bare `Settings()`
+        # still reads `backend/.env`. Once that file exists this test received
+        # real credentials, made a real paid API call and got IPA back instead
+        # of None -- so it never tested what it claims on any machine that had
+        # a `.env`, and it failed on every machine that had one.
         from app.config import Settings
         monkeypatch.setattr(
-            "app.pronunciation.gemma.settings", Settings()
+            "app.pronunciation.gemma.settings", Settings(_env_file=None)
         )
         assert gemma_ipa("Bob") is None
 

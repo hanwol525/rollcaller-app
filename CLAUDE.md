@@ -333,7 +333,7 @@ not notice.
 ./app/venv/bin/python -m eval paired --run eval/runs/<stamp>.jsonl --engines oracle,today
 ./app/venv/bin/python -m eval probe               # 1 raw LLM request
 ./app/venv/bin/python -m eval probe  --levers     # 5 of them; run before any scored LLM run
-./app/venv/bin/python -m pytest eval/tests -q     # 332 tests, ~50 s
+./app/venv/bin/python -m pytest eval/tests -q     # 345 tests, ~52 s
 ```
 
 ⚠️ **Never run bare `pytest` from `backend/`.** It collects both trees in one process and
@@ -343,6 +343,92 @@ tests. Always name the tree. `eval/pytest.ini` exists because `app/tests/pytest.
 eval/tests` gets rootdir `backend` and *no* configfile, so `--strict-markers` is off and a typo'd
 marker only raises `PytestUnknownMarkWarning` — the test still passes — instead of failing
 collection.
+
+**The harness pins its own espeak-ng, and that is load-bearing rather than tidy.**
+`eval/espeak_setup.py` runs from `eval/__init__.py` — before the submodules, because
+`eval/dataset.py` imports `g2p` at module level and `EspeakWrapper.set_library` is only
+consulted when a backend is *constructed*. It points phonemizer at the `espeakng-loader` wheel
+already in the venv. Without it the harness relies on phonemizer discovering a system
+espeak-ng, which **fails silently**: `g2p.warm()` catches every exception and negative-caches
+it, so an unfindable library is indistinguishable from a working one — `espeak_ipa()` returns
+`""`, one WARNING line is the only trace, and a whole run reads as 100% refusal in every
+language rather than as void. ⚠️ Never hardcode the filename (`libespeak-ng.so` / `.dylib` /
+`espeak-ng.dll`, no `lib` prefix on Windows), and note that `make_library_available()` is **not**
+sufficient — it only extends the DLL search path and never tells phonemizer anything. Adopting
+the pin was verified not to move the numbers: the bundled library is also **1.52.0** and
+re-running `floor`+`oracle` on `test` under it reproduced the committed baseline **bit-for-bit**,
+16 cells and 352 fields. A version mismatch is not gated here but recorded —
+`provenance._espeak()` compares against `EXPECTED_ESPEAK` and writes a warning into the run file.
+
+**Every file read and write under `eval/` names its encoding explicitly, and the audit is
+mechanical:** `python -X warn_default_encoding -W always::EncodingWarning -m eval …`, which
+fires on `open(p, "w")` and stays silent on `open(p, encoding="utf-8")`. Our own code is at zero;
+the remaining warnings all come from `regex`, `huggingface_hub` and `panphon`. The one site this
+caught was `provenance._git`, which passed `text=True` with no `encoding` — and that one mattered
+because `git_dirty` is `bool()` of `git status --porcelain`, whose output carries paths: on a
+single-byte-code-page host an undecodable path fell into the bare `except` and returned `""`, so
+the header would have reported a **clean tree while the tree was dirty**. It is now
+`encoding="utf-8", errors="replace"`, so a byte we cannot read costs one character rather than
+the whole field.
+
+### Running the harness on Windows
+
+⚠️ Every command above is POSIX. The table below is the PowerShell form. **It was written on the
+macOS host and has not been executed on Windows** — the facts marked ✅ were verified from the
+published wheels and indices, the commands themselves are translations.
+
+| Purpose | POSIX (macOS/Linux) | PowerShell (Windows) |
+|---|---|---|
+| Interpreter | `./app/venv/bin/python` | `app\venv\Scripts\python.exe` |
+| Create the venv | `python3 -m venv app/venv` | `py -3.12 -m venv app\venv` |
+| App deps | `… -m pip install -r app/requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu` | same, with the Windows interpreter |
+| Eval deps | `./app/venv/bin/python -m pip install -r eval/requirements.txt` | `app\venv\Scripts\python.exe -m pip install -r eval\requirements.txt` |
+| Backend suite | `./app/venv/bin/python -m pytest app/tests -q` | `app\venv\Scripts\python.exe -m pytest app/tests -q` |
+| Eval tests | `./app/venv/bin/python -m pytest eval/tests -q` | `app\venv\Scripts\python.exe -m pytest eval/tests -q` |
+| Generate | `./app/venv/bin/python -m eval generate --split test --engines floor,oracle` | `app\venv\Scripts\python.exe -m eval generate --split test --engines floor,oracle` |
+| Score, report, paired, probe | as above, with `-m eval` plus the subcommand | same, with the Windows interpreter |
+| **One env var, one command** | `GEMMA_MODEL=x ./app/venv/bin/python -m eval …` | `$env:GEMMA_MODEL = "x"` on **its own line**, then the command |
+| Reset that env var | nothing to do — it never leaked | `Remove-Item Env:\GEMMA_MODEL` |
+| Force UTF-8 I/O | not needed | `$env:PYTHONUTF8 = "1"` |
+| Encoding audit | `… -X warn_default_encoding -W always::EncodingWarning -m eval …` | same, with the Windows interpreter |
+| Search for a literal | `command grep -rn "push.gate" .` | `Select-String -Path . -Pattern "push.gate" -Recurse` |
+
+**Four traps, in the order they will bite.**
+
+1. ⛔ **`VAR=value command` is a parse error in PowerShell**, not an ignored prefix. And `$env:VAR`
+   **persists for the rest of the session**, so the second model's run silently reuses the first
+   model while provenance claims otherwise — two runs of one model filed under different names,
+   which is worse than no data. Reset explicitly between runs, and make provenance the guard:
+   **assert each summary's recorded `model_id` against the row it is filed under.** (The four runs
+   behind the current baseline were checked that way and matched, including the Qwen re-run's
+   `request_modification`. The POSIX form scopes to one command, which is why that run was safe.)
+2. **Set `PYTHONUTF8=1` for any run whose stdout is redirected to a file.** Every `open()` under
+   `eval/` names its encoding, but that does not change how `print` encodes to a redirected pipe,
+   and cp1252 cannot represent `ʃ ɪ ˈ ɔ ː` at all — it raises rather than corrupting, so a long
+   run dies at the first IPA character.
+3. **The macOS venv does not transfer.** `backend/app/venv` holds macOS wheels. Build a fresh one.
+4. **`core.autocrlf` defaults to `true` in Git for Windows' installer**, which is what
+   `/.gitattributes` is there for — it pins `backend/eval/results/*.md` to LF so committed
+   summaries do not show every line as changed.
+
+✅ **Verified from the published artifacts, 2026-11-14 — the Windows numbers will be comparable to
+the baseline.** `espeakng-loader` 0.2.4 ships `win_amd64` **and** `win_arm64` wheels; the
+`win_amd64` DLL carries the version string **1.52.0**, matching `EXPECTED_ESPEAK` and
+`test_models.py`'s pin, and its `espeak-ng-data/` is **byte-identical** to the macOS wheel's —
+`phondata`, `phonindex`, `phontab` and `intonations` all match, 364 files each. So the phoneme
+tables are the same and `eval/espeak_setup.py`'s pin resolves on Windows with no system
+espeak-ng installed. Still worth confirming once on the box: `EspeakWrapper().version` after
+`import eval`.
+
+✅ **Unlike this Mac, a Windows x86_64 host can run the whole ML stack.** `torch==2.13.0+cpu` —
+the exact pin in `app/requirements.txt` — publishes `win_amd64` wheels for cp310 through cp314 on
+the PyTorch CPU index, so the install succeeds with `--extra-index-url` and `kokoro` comes with
+it. **Consequences worth planning around:** the **11 `@integration` tests actually run** there
+rather than skipping, and `transformers` imports, so `recognize()` works and recordings produce
+real IPA instead of falling through to g2p on the spelling. The slim-venv Gotcha below is a
+**macOS x86_64** limitation, not a property of the project. Putting `ffmpeg` on `PATH` recovers
+the other 4 skips, so a Windows box can reach **197 passed, 0 skipped** — the only machine in
+this project that can.
 
 **Three engines, and the generate/score split is load-bearing.** `floor` is `espeak_ipa(name,
 "en-us")` — what the app degrades to when no LLM is configured, and what `today` falls back to
@@ -504,26 +590,29 @@ The eSpeak findings below were generated twice, 16 cells each, and reproduced **
   x86_64, macOS 12.7.6). `torch`'s last macOS x86_64 wheel is **2.2.2**; later macOS wheels
   are arm64-only and macOS 14+, and `requirements.txt` pins `torch==2.13.0+cpu`, which has no
   macOS wheel at all. `kokoro` needs `torch`, so **the 11 `@integration` tests can never run on
-  this Mac** — they need Linux or an arm64 Mac on macOS 14+. Expected local state is **182
+  this Mac** — they need Linux, an arm64 Mac on macOS 14+, or **Windows x86_64**, where the
+  `torch==2.13.0+cpu` pin does have wheels (verified 2026-11-14; see the Windows subsection in
+  the eval-harness section). Expected local state is **182
   passed, 15 skipped, 0 failed** (197 collected): 11 skip without `kokoro`, 4 transcode tests
-  skip without `ffmpeg`. ⚠️ **With `backend/.env` present it is 181 / 1 failed / 15** — see the
-  credentials Gotcha below; that failure is environmental, not a regression. Otherwise treat
-  any *failure* as a regression; the skips are the design.
+  skip without `ffmpeg`. That count now holds **whether or not `backend/.env` exists** — it
+  briefly read 181 / 1 failed / 15 with credentials present, until the dotenv-leak fix below.
+  Treat any *failure* as a regression; the skips are the design.
   (Re-measured 2026-11-13, and the whole census in this file was re-derived with it:
   `--collect-only` gives 197, `-m integration` gives 11, and the 15 skips are exactly 11
   `kokoro not installed` plus 4 `ffmpeg not installed`. The previous figures — 158/15/173, "12
   `@integration`", "16 of the 127" — were all stale.)
-- ⚠️ **Now that `backend/.env` exists, the app suite makes a real paid API call and one test
-  fails.** `app/tests/test_gemma_g2p.py::test_gemma_ipa_returns_none_when_env_unset` does
-  `monkeypatch.delenv("GEMMA_*")` and then `Settings()`, but **`delenv` unsets the environment,
-  not the dotenv source** — pydantic still reads `backend/.env`, so the settings come back
-  populated, `gemma_ipa("Bob")` hits the network and returns `'bɒb'` instead of `None`. Proof:
-  with the three vars deleted from `os.environ`, `Settings().gemma_model` is
-  `google/gemma-4-31b-it` while `Settings(_env_file=None).gemma_model` is `None`. **So the
-  expected local state is now 181 passed / 1 failed / 15 skipped with credentials present, and
-  182/15 without** — and the test never tested what it claims on any machine that had a `.env`.
-  The fix is `Settings(_env_file=None)`, or monkeypatching the module's `settings` object
-  directly. Fenced out of 04a (`backend/app/**`); owner is the brief that owns the test files.
+- ✅ **Fixed — but the rule behind it is worth keeping: `monkeypatch.delenv` unsets the
+  environment, not the dotenv _source_.** A bare `Settings()` still reads `backend/.env`, so
+  `test_gemma_ipa_returns_none_when_env_unset` used to receive **real credentials**, make a real
+  **paid** API call and get `'bɒb'` back instead of `None` — it failed on every machine that had
+  a `.env` and had never tested what it claims on one. Proof of the mechanism: with all three
+  vars deleted from `os.environ`, `Settings().gemma_model` is `google/gemma-4-31b-it` while
+  `Settings(_env_file=None).gemma_model` is `None`. It now passes `_env_file=None`, and the suite
+  is back to **182 passed / 15 skipped / 0 failed with credentials present**, verified to spend
+  **$0.0000** across a full run. ⚠️ **Any new test that needs a setting unset must pass
+  `_env_file=None`** — `delenv` alone is not enough, and the failure is a silent live network
+  call rather than an error. The other two `Settings()` sites in that file are safe for the
+  opposite reason: they `setenv` their test values first, and the environment outranks the file.
 - **In the slim venv a recording produces no IPA at all, and that is now the honest answer.**
   `recognize()` needs `transformers`, which is absent here, so it returns `None` and logs
   `wav2vec2 recognizer unavailable (ModuleNotFoundError: ...)` **once per process**. The recording
@@ -600,9 +689,9 @@ The eSpeak findings below were generated twice, 16 cells each, and reproduced **
   numbers exist only if they are run and recorded by hand.
 - **Three in-tree comments still name the deleted "push gate."** `app/tests/pytest.ini:9` (the
   `integration` marker description, which `pytest --markers` prints, so the suite advertises a
-  gate the repo no longer has), `app/tests/test_models.py:529` (**"deselecting the other 11" is
-  off by one** — that test is itself `@integration` and there are 11 in total, so the others
-  number 10; the gate it says deselected them is also gone), and `app/tests/_deps.py:6` (justifies `find_spec` over a real import partly by
+  gate the repo no longer has), `app/tests/test_models.py:529` (its count is now correct at "the
+  other 10" — that test is itself `@integration` of 11 total — but the gate it says deselected
+  them is gone), and `app/tests/_deps.py:6` (justifies `find_spec` over a real import partly by
   that CI job installing the full pinned requirements — now moot; only the slim-local-venv half
   of the rationale still applies). Prose only, nothing breaks. All three were fenced out of the
   brief that deleted the gate, so they belong to the brief that owns the test files. Note when

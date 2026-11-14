@@ -526,7 +526,7 @@ class TestPronunciationFallbacks:
 
         Marked integration: warm_all() constructs a real KPipeline and a real
         wav2vec2 model, downloading weights. Unmarked it was the one test that
-        made the push gate pull ~1.6 GB despite deselecting the other 11.
+        made the push gate pull ~1.6 GB despite deselecting the other 10.
         """
         from app.pronunciation.orchestrator import warm_all
         warm_all()  # should complete without error
