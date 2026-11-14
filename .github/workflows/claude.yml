@@ -19,9 +19,23 @@ jobs:
       (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      pull-requests: read
-      issues: read
+      # write, not read, so that asking Claude for a fix in a review comment
+      # gets a commit on the PR branch instead of a suggestion nobody can
+      # merge. See CLAUDE.md "Working agreement" section 2.
+      #
+      # Safe to widen here because the action gates itself: it runs only for
+      # users with write access to the repo (one collaborator on this repo),
+      # and `allowed_bots` is empty by default, so Apps and bots cannot
+      # trigger it at all. Its own system prompt also refuses a push to any
+      # branch other than the one it was invoked on.
+      #
+      # The action's docs are self-contradictory about whether this block is
+      # even consulted -- it governs GITHUB_TOKEN while the default path uses
+      # the Claude GitHub App token, which they say "always includes" these --
+      # but they also say to set them explicitly, so this removes the question.
+      contents: write
+      pull-requests: write
+      issues: write
       id-token: write
       actions: read # Required for Claude to read CI results on PRs
     steps:

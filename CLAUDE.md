@@ -12,6 +12,12 @@ Built fast for a hackathon, now being converted into a maintainable portfolio ap
 
 ## Working agreement — read this first
 
+⚠️ **The git rule depends on where you are running, and the two contexts differ completely.**
+Work out which one you are in *before* touching git. **`GITHUB_ACTIONS=true` in the environment
+means the second one.** If you cannot tell, assume the first.
+
+### 1. A local session on Han's machine — the default, and the strict one
+
 > **Han owns the git history. Claude Code does not write to git — at all.**
 >
 > Make changes in the working tree and **leave them there, uncommitted and unstaged.** Han
@@ -29,6 +35,36 @@ Built fast for a hackathon, now being converted into a maintainable portfolio ap
 > previous session having done it. If you believe a commit is necessary, **say so and stop.**
 >
 > Instead of committing, end each unit with a handoff report.
+
+### 2. GitHub Actions on a pull request — commit and push the fix
+
+> **When a review comment or an `@claude` mention asks for a fix, applying it and pushing it to
+> the branch under review is the deliverable, not a violation.** Do it without asking. A fix that
+> exists only as a suggestion in a comment cannot be merged, and waiting for an out-of-band
+> sign-off defeats the point of having asked — that wait is the exact problem this split exists
+> to remove. The §1 rule is about Han's *local* working tree, and it does not reach a PR branch
+> in CI.
+>
+> **Scope: the branch you were invoked on, and nothing else.** One commit per coherent fix, with
+> a message naming what it fixes and the review comment it answers. Do not open or merge pull
+> requests, and do not change anything the comment did not ask about — §1's scope discipline
+> still applies in full, it is only the act of committing that is lifted.
+>
+> **Still forbidden here, as everywhere:** pushing to `main` or any default or protected branch,
+> force-push, rewriting published history (`rebase`, `reset --hard`, `commit --amend` on pushed
+> commits), `tag`, and any release operation.
+>
+> **If you think the requested fix is wrong, say so in the comment and push nothing.** "The code
+> wins" outranks a review comment too; a comment asking for a change the code contradicts gets a
+> reply, not a commit.
+
+⚠️ **Three things the action already enforces, so do not build policy around them.** It runs
+**only for users with write access** to the repo — on this public repo that is Han alone — and
+bots cannot trigger it at all, because `allowed_bots` is empty by default. Its own system prompt
+refuses a push to any branch other than the one it was invoked on, independently of what the
+workflow grants. And **Claude's GitHub App has no workflow write access**, so a fix touching
+`.github/workflows/**` *cannot* be pushed from CI: say so in the comment and leave it to a local
+session.
 
 **The code wins.** Where any brief, document, comment or this file contradicts what the code
 demonstrably does, the code is right. Flag the contradiction explicitly, reproduce it, then
@@ -105,6 +141,11 @@ The two workflows that remain are Claude Code integrations and neither runs a te
 `claude-code-review.yml` reviews pull requests (`opened`, `synchronize`, `ready_for_review`,
 `reopened`), and `claude.yml` answers an `@claude` mention in an issue, an issue comment, a PR
 review or a PR review comment. Both need an `ANTHROPIC_API_KEY` repository secret.
+
+⚠️ **The two are not equally privileged, deliberately.** `claude.yml` holds `contents`,
+`pull-requests` and `issues` at **write**, because its job is to *apply* a requested fix and
+push it to the PR branch — see §2 of the Working agreement. `claude-code-review.yml` stays at
+**read**: it only reports findings, so it has no reason to be able to commit.
 
 There is still **no linter and no formatter** — no ruff/black/eslint/prettier config anywhere.
 `svelte-check` is the only style-adjacent check in the repo, and nothing runs it automatically —
