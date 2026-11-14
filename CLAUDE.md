@@ -313,18 +313,217 @@ therefore needs a reverse proxy routing `/auth`, `/invite` and `/media` to the b
 former GKE setup did this at the nginx ingress. A bare adapter-node deploy with nothing in front
 404s on every clip and invite call. Recorded in `DEPLOY-NOTES.md`.
 
+## The pronunciation eval harness
+
+`backend/eval/` measures the pronunciation path against a public dataset. It is **not part of the
+app**: `backend/Dockerfile` copies only `app/requirements.txt` and `app/`, and the harness carries
+its own `eval/requirements.txt` and `eval/pytest.ini`. It imports app code read-only —
+`g2p.espeak_ipa`, `g2p.g2p`, `g2p.DEFAULT_LANGUAGE`, `orchestrator.ipa_refusal`,
+`tts.prepare_ipa`, `config.settings`, and — in `eval/llm.py` only — four **private** names from
+`gemma`: `_SYSTEM`, `_FEWSHOT`, `_sanitize_ipa`, `_THINK_OPEN`. It never touches the DB.
+⚠️ Those four privates are what a `gemma.py` refactor will break, and the app's own suite will
+not notice.
+
+```bash
+# from backend/, into the same venv as the app
+./app/venv/bin/python -m pip install -r eval/requirements.txt    # once
+./app/venv/bin/python -m eval generate --split test --engines floor,oracle
+./app/venv/bin/python -m eval score  --run    eval/runs/<stamp>.jsonl
+./app/venv/bin/python -m eval report --scores eval/runs/<stamp>.scores.json
+./app/venv/bin/python -m eval paired --run eval/runs/<stamp>.jsonl --engines oracle,today
+./app/venv/bin/python -m eval probe               # 1 raw LLM request
+./app/venv/bin/python -m eval probe  --levers     # 5 of them; run before any scored LLM run
+./app/venv/bin/python -m pytest eval/tests -q     # 332 tests, ~50 s
+```
+
+⚠️ **Never run bare `pytest` from `backend/`.** It collects both trees in one process and
+`app/tests/conftest.py:19-24` writes `os.environ` at import time, which then leaks into the eval
+tests. Always name the tree. `eval/pytest.ini` exists because `app/tests/pytest.ini` sets
+`testpaths = .` and is loaded only when its own directory is the target — without it `pytest
+eval/tests` gets rootdir `backend` and *no* configfile, so `--strict-markers` is off and a typo'd
+marker only raises `PytestUnknownMarkWarning` — the test still passes — instead of failing
+collection.
+
+**Three engines, and the generate/score split is load-bearing.** `floor` is `espeak_ipa(name,
+"en-us")` — what the app degrades to when no LLM is configured, and what `today` falls back to
+per name. It is **not** the shipped path when `GEMMA_*` is set, so a gain measured against it is
+not a gain over production. `oracle` is `espeak_ipa` handed the dataset's own language label —
+Brief 04's **reference point**, not an upper bound and not a ceiling (the label is the Wiktionary
+section a row was mined from, not the name's origin, and a hindsight best-of-two chosen per name
+*using the reference* beats it in 6 of 8 languages — though in `fr`, where that margin looks
+largest at 52.9%, **95% of it is a scoring artifact**: unstripped `(en)` language-switch markers
+that panphon charges for, and excluding those 15 names leaves 9.4%). `today` is `g2p.g2p`, i.e. `gemma_ipa(name) or
+espeak_ipa(name)`. ⚠️ Do not read any of this into the `ceiling` **column** of the per-language
+error table, which means something unrelated: the cost of saying nothing. `generate` calls engines and writes JSONL; `score` is **pure**, so re-scoring
+never re-calls a model and a scoring rule can change for free.
+
+**The unit is the name, not the dataset row.** The corpus attests several pronunciations for some
+names — up to **12** for one Spanish name in `test`, mean **1.23** — and an engine emits one, so
+each engine is called once per name and scored against the **closest** attested variant: any
+attested pronunciation counts as correct. ⚠️ The dataset card's **2.47 is Spanish's mean, not a
+maximum and not corpus-wide**; measured here `es` is 2.49 and `vi` 2.62, so Spanish is not even
+the top. **2,507** names in both `test` (3,091 rows) and `dev` (3,120 rows); `train` is 20,084
+names over 24,841 rows.
+
+**The number is error _per reference segment_, and it is not a rate.** Saying nothing costs a flat
+~7.25 per segment (the `ceiling` column); saying too much exceeds that without bound, because
+every extra segment is an insertion. **So a figure above `ceiling` is a diagnostic rather than a
+worse pronunciation** — in this corpus it is always eSpeak narrating a script it cannot read.
+Engines are compared within a language and never across, because dividing by reference length
+prices the same error differently in a short name. Every figure is **authenticity against
+Wiktionary, not correctness**.
+
+**`score` bootstraps each cell on its own, which is the _marginal_ interval — use `paired` for
+any engine-vs-engine claim.** Two overlapping marginal intervals do not mean two engines are
+indistinguishable, because both answered the same names. On `test`, `ar`/`oracle` 0.590
+[0.389, 0.827] and `ar`/`today` 0.596 [0.422, 0.798] overlap almost entirely, while the paired
+difference is −0.006 [−0.250, 0.262] — the same conclusion, far tighter, and for the right
+reason. `eval/paired.py` exists because three figures in the first baseline were computed in a
+throwaway script and typed in by hand, and one had drifted by the time it was read.
+
+**`today` needs credentials, and a run that calls a model needs Han's approval with the cost
+stated first.** `GEMMA_BASE_URL` / `GEMMA_MODEL` / `GEMMA_API_KEY` go in **`backend/.env`** — not
+the repo root, because `env_file` resolves against the process CWD. None is committed and
+`config.py` defaults all three to `None`, so `today` refuses to start rather than running
+half-configured. The eSpeak engines cost nothing and need no approval.
+
+⚠️ **`temperature: 0` does not make the LLM path reproducible, and `gemma.py:268` claims it
+does.** That line reads `"temperature": 0,  # deterministic -- prep re-runs are stable`. Measured
+against OpenRouter on 2026-11-13, **eight identical requests** for `Malgorzata` returned **three**
+distinct strings — `małɡɔʐˈata` ×6, `maɫɡɔʐˈata`, `małɡɔʐˈatə` — so the comment is false as
+written. Reproduce with `python -m eval probe --name Malgorzata`, repeated. Across all 13 calls of
+that session the output varied in exactly two positions, `ł`~`ɫ` and final `a`~`ə`, and all four
+combinations appeared. The likely mechanism is OpenRouter routing the same request to providers
+with differing quantisations, but that is **not verified** — `probe` does not record the served
+provider.
+
+⚠️ **That variation is not cosmetic: it changes what reaches audio.** `ł` is mapped to `w` by
+`gemma.py`'s `_GRAPHEME_MAP`, so `małɡɔʐˈata` survives as `mawɡɔʐˈata`; `ɫ` is *not* in Kokoro's
+114-symbol vocabulary and `prepare_ipa` leaves it alone, so `maɫɡɔʐˈata` reaches the model with a
+symbol that `kokoro/model.py` then drops silently — the same clip, minus a consonant. (`ʐ` is
+out-of-vocabulary in all four variants.) Two consequences: a `today` figure carries a run-to-run
+variance component that re-scoring **cannot** remove, so every `today` summary must name the run it
+came from; and at the app level a participant's clip can change pronunciation between two Prep Clips
+runs with no input change. **The second is fenced** — 04a changes no app behaviour, so the stale
+comment and the question of pinning a provider belong to the brief that owns `gemma.py`.
+
+**Every `today` row carries exactly one branch, decided by the wrapper's return value rather than
+the logs** — `gemma_ipa` logs nothing on success and its two "unconfigured" warnings are deduped
+process-wide, so logs alone cannot classify a row. The four are `llm_accepted` / `llm_rejected` /
+`llm_empty` / `llm_error`; an unexplained `None` **raises**, and `runfile.read` refuses a `today`
+row with no branch, which is what makes "none unclassified" true by construction. ⚠️ Patch
+`app.pronunciation.g2p.gemma_ipa`, never `gemma.gemma_ipa`: `g2p.py:16` binds the name into its
+own namespace, so patching the other one records nothing and silently measures the real path.
+
+Summaries are committed to `eval/results/`. `eval/runs/` (raw per-name output) and `eval/.cache/`
+(the dataset, CC BY-SA 4.0, pinned at `saraelhark/say-my-name@c7d27b1e`) are gitignored and
+reproducible from the provenance header every summary carries.
+
+### What the baseline found — `eval/results/baseline-2026-11-13.md`
+
+✅ **Complete: all three engines, both models, the full `test` split.** The question the harness
+exists for is answered — **no, an LLM does not beat simply using the right eSpeak voice, but it
+is the only engine that never refuses.** On the paired per-name test, `oracle` beats Gemma 4 31B
+in 6 of 8 languages (`ar` and `vi` are ties), Gemma beats `floor` in all 8, and Gemma beats
+Qwen3.5 9B in 7 of 8. But `today` voiced **2,507 of 2,507** names against `oracle`'s 2,491 and
+`floor`'s 2,482: `oracle` refuses 16 Vietnamese names on tone digits. **So Brief 04's shape (LLM
+picks the language, eSpeak phonemizes) is what the numbers support — and it inherits those
+refusals unless the guard work ships with it.** Total cost $0.1889.
+
+⚠️ **Three things that bound that answer.** `oracle` is handed the dataset's language label, so
+it bounds a *perfect* identifier rather than a real one. The LLM path is **not reproducible** —
+35.6% of names return different IPA across identical re-runs, so every `today` figure is one
+draw, and the two tie verdicts (`ar` n=57, `vi` n=37) are the cells where that matters most.
+And `today` has its own Kokoro-boundary loss: it writes ASCII `g` where IPA wants `ɡ`, which is
+out-of-set, so that consonant is deleted from the clip silently.
+
+The eSpeak findings below were generated twice, 16 cells each, and reproduced **bit-for-bit**.
+
+- **`oracle` beats `floor` in all 8 languages**, by 69% (de) to 99% (ar) of the floor's own
+  error; the paired 95% interval on the per-name difference excludes zero in all eight. The gain
+  from choosing the right voice is real and large. ⚠️ The `de` end is an over-estimate — panphon
+  cannot read the `ɚ` en-us eSpeak writes for German `-er`, so the floor is charged a full miss
+  for a near-perfect match; re-scoring `ɚ` as **`ɐ`** — the symbol the German references
+  themselves use — puts `de` at 62%.
+- ⚠️ **The narration guard is script-specific, and Arabic walks straight through it.** All 57
+  Arabic names under `floor` are narrated rather than pronounced (`أسماء` → `… ˈæɹəbɪksˈiːn
+  ˈæɹəbɪkmˈiːm …`, "Arabic seen, Arabic meem"; all 302 tokens in the cell carry the `ˈæɹəbɪk`
+  prefix) and **39 of the 57 are not refused**. The other 18 are not caught by anything about
+  narration: they are the names containing **د**, whose narration `ˈæɹəbɪkdˈæl1` carries a stray
+  digit — د and ذ are the only two letters in the alphabet that do, so 18/57 is a corpus
+  accident, not a rate. **The reason the guard misses the rest is lexical, not positional:** its
+  only narration rule is the marker set `{"lˈɛɾɚ", "lˌɛɾɚ"}` (`tts.py:147`), eSpeak's English
+  word *letter* — and for the **28 basic Arabic letters** eSpeak uses the letter's own Arabic
+  name instead (`ا` → `ˈæɹəbɪkælˈif`, `د` → `ˈæɹəbɪkdˈæl1`), so the marker, and even the bare
+  substring `ɛɾɚ`, occur **0 times** in all 57 outputs. Matching it anywhere rather than
+  token-finally would still catch 0 of 57; the signal the guard has no rule for is the leading
+  script name, which prefixes every token.
+  ⚠️ **Do not generalise that to "eSpeak never says *letter* for Arabic" — it does, for any
+  character it cannot name**, and there token-finality is exactly what misses it. `ڤ` (VEH) →
+  `ˈæɹəbɪklˌɛɾɚsˈɪksˈeɪfˈɔːɹ`, i.e. "Arabic letter six A four", narrating the codepoint U+06A4;
+  likewise `ٱ`, tanwīn `ً` and tatweel `ـ`. The marker is present but **mid-token**, so the
+  token-final test fails on it. Both halves matter to the fix: relaxing token-finality buys
+  nothing on these 57 names and genuinely helps on extended letters.
+  Owner: the guard fix, not 04a.
+- ⚠️ **eSpeak writes one Vietnamese tone as a vowel, so the guard cannot see it.** *sắc* is
+  written **`ɜ`** and never a digit (140 of 144 probed syllables; the 4 misses are illegal rimes
+  eSpeak reduces to a glide). The digit test therefore passes `Hiếu` → `hˈiɛɜw`, and `ɜ` **is**
+  in Kokoro's 114-symbol set, so unlike the dental diacritics it is not filtered out — the guard
+  passes it and a clip is produced. (What that token *sounds* like is untested; nothing in the
+  harness renders audio.) ⚠️ Do not read the other direction as settled: *ngang* is not silent in
+  general — eSpeak writes the digit `1` for the `âu`/`êu` rimes, so `Châu` → `tʃˈə1w` **is**
+  refused, and `â` is a vowel mark rather than a tone mark, so that digit tracks the rime. No
+  name in either split has that rime, which is the only reason the corpus looked exceptionless.
+  *sắc* is the only tone that never refuses; the 43% rate is this corpus's tone **and rime** mix
+  and a real roster's would be higher.
+- ⚠️ **Adopting the right-language voice loses phonemes before Kokoro — in two different places,
+  only one of which is silent.** `tts.prepare_ipa`'s `_normalise_for_kokoro` folds away every
+  combining mark but U+0303, and only what survives that reaches `kokoro/model.py`'s 114-symbol
+  filter. Measured per stage over the whole `test` run:
+  - **Folded away by `prepare_ipa`:** dental `◌̪` (ar ×6, vi ×10) and one syllabic `◌̩` (de).
+  - **Dropped by the 114-set:** `ʕ`×12 `ħ`×7 (ar), `ʑ`×90 (pl), `ɫ`×2 (tr), `ʏ`×1 (de), `ɗ`×2
+    and the tone digits (vi), a stray `-` (fr ×2, vi ×1), and `1`×21 in `ar`/`floor` narration.
+
+  ⚠️ **This file used to call all of it "dropped silently by `kokoro/model.py`", which was wrong
+  about both the stage and the silence.** The fold **logs** — `tts.py:233`, `"IPA folded to
+  Kokoro's vocabulary"`, asserted by `test_synthesize_logs_when_ipa_is_folded`. The vocabulary
+  filter is the silent one.
+
+  ⚠️ **Nor is it an `oracle`-only cost.** `de`/`floor` pays **+0.002** (1.830 → 1.832) for that
+  one syllabic mark in `Karsten`; every other `floor` cell pays exactly +0.000. Against `oracle`
+  it costs back **+0.258** of the **49.375** gained in Arabic — both on the 39 names `ar`
+  actually voices — plus +0.059 (pl), +0.096 (tr), +0.034 (vi) and +0.011 (de). `fr`/`oracle`
+  loses two hyphens at a measured cost of **+0.000**, because panphon cannot read a hyphen
+  either. (`en-us`'s Arabic digit `1` is equally out-of-set, but the guard refuses those names,
+  so none of it is voiced.) Small against the gain, but concentrated in the languages the floor
+  already fails worst.
+
 ## Gotchas that cost time
 
 - **The local venv is deliberately slim, and on this machine it cannot be otherwise** (Intel
   x86_64, macOS 12.7.6). `torch`'s last macOS x86_64 wheel is **2.2.2**; later macOS wheels
   are arm64-only and macOS 14+, and `requirements.txt` pins `torch==2.13.0+cpu`, which has no
-  macOS wheel at all. `kokoro` needs `torch`, so **the 12 `@integration` tests can never run on
-  this Mac** — they need Linux or an arm64 Mac on macOS 14+. Expected local state is **158
-  passed, 15 skipped, 0 failed** (173 collected): 11 skip without `kokoro`, 4 transcode tests
-  skip without `ffmpeg`. Treat any *failure* as a regression; the skips are the design.
-  (The counts stated elsewhere in this file — "the 12 `@integration` tests", "16 of the 127
-  backend tests", "the other 11" — are a census that has gone stale and is fenced to the brief
-  that owns the test files. This line is the measured one.)
+  macOS wheel at all. `kokoro` needs `torch`, so **the 11 `@integration` tests can never run on
+  this Mac** — they need Linux or an arm64 Mac on macOS 14+. Expected local state is **182
+  passed, 15 skipped, 0 failed** (197 collected): 11 skip without `kokoro`, 4 transcode tests
+  skip without `ffmpeg`. ⚠️ **With `backend/.env` present it is 181 / 1 failed / 15** — see the
+  credentials Gotcha below; that failure is environmental, not a regression. Otherwise treat
+  any *failure* as a regression; the skips are the design.
+  (Re-measured 2026-11-13, and the whole census in this file was re-derived with it:
+  `--collect-only` gives 197, `-m integration` gives 11, and the 15 skips are exactly 11
+  `kokoro not installed` plus 4 `ffmpeg not installed`. The previous figures — 158/15/173, "12
+  `@integration`", "16 of the 127" — were all stale.)
+- ⚠️ **Now that `backend/.env` exists, the app suite makes a real paid API call and one test
+  fails.** `app/tests/test_gemma_g2p.py::test_gemma_ipa_returns_none_when_env_unset` does
+  `monkeypatch.delenv("GEMMA_*")` and then `Settings()`, but **`delenv` unsets the environment,
+  not the dotenv source** — pydantic still reads `backend/.env`, so the settings come back
+  populated, `gemma_ipa("Bob")` hits the network and returns `'bɒb'` instead of `None`. Proof:
+  with the three vars deleted from `os.environ`, `Settings().gemma_model` is
+  `google/gemma-4-31b-it` while `Settings(_env_file=None).gemma_model` is `None`. **So the
+  expected local state is now 181 passed / 1 failed / 15 skipped with credentials present, and
+  182/15 without** — and the test never tested what it claims on any machine that had a `.env`.
+  The fix is `Settings(_env_file=None)`, or monkeypatching the module's `settings` object
+  directly. Fenced out of 04a (`backend/app/**`); owner is the brief that owns the test files.
 - **In the slim venv a recording produces no IPA at all, and that is now the honest answer.**
   `recognize()` needs `transformers`, which is absent here, so it returns `None` and logs
   `wav2vec2 recognizer unavailable (ModuleNotFoundError: ...)` **once per process**. The recording
@@ -343,8 +542,13 @@ former GKE setup did this at the nginx ingress. A bare adapter-node deploy with 
   `tts.py:_reject_reason` rejects IPA that has nothing to voice (empty, wrapper-only like `/ /`,
   or stress marks only — judged with stress removed, because `synthesize` strips it before
   building the override), that contains a digit, that is mostly consecutive English
-  letter *names*, or whose token ends in eSpeak's word for "letter" (how it narrates a script it
-  cannot read: 李雷 → `tʃˈaɪniːzlˌɛɾɚ tʃˈaɪniːzlˌɛɾɚ`, "Chinese letter" twice). On a hit it logs
+  letter *names*, or whose token ends in eSpeak's word for "letter" (how it narrates **Han**
+  script: 李雷 → `tʃˈaɪniːzlˌɛɾɚ tʃˈaɪniːzlˌɛɾɚ`, "Chinese letter" twice). ⚠️ That last test is
+  narrower than "a script it cannot read", in two ways. eSpeak names the 28 basic Arabic letters
+  individually and never uses the word, so the marker is simply absent — it catches 0 of 57
+  Arabic-script names. And for characters eSpeak *cannot* name (`ڤ`, tanwīn, tatweel) the marker
+  **is** emitted but lands mid-token, so token-finality misses it. Both measured in the
+  eval-harness section above. On a hit it logs
   and clears the override, so Kokoro voices the plain name via its own G2P. It deliberately does
   **not** raise; the *routes* decide what a refusal means, via
   `orchestrator.ipa_refusal`. **The two that make a durable promise both refuse outright:** the
@@ -377,16 +581,16 @@ former GKE setup did this at the nginx ingress. A bare adapter-node deploy with 
 - **Tests needing the real ML stack are marked `@pytest.mark.integration`** plus a `skipif` on
   `kokoro` being importable. The marker lets you deselect by intent (`-m "not integration"`);
   the skipif keeps any kokoro-less machine from erroring.
-- **16 of the 127 backend tests now run nowhere automatically** — both skipped groups, not just
-  the marked ones. The 12 `@integration` tests need `kokoro`, which this venv does not have (see
+- **15 of the 197 backend tests now run nowhere automatically** — both skipped groups, not just
+  the marked ones. The 11 `@integration` tests need `kokoro`, which this venv does not have (see
   the slim-venv Gotcha above), so exercising them takes a machine with the full ML stack. The
   other 4 are `test_transcode.py`'s: they carry **no** marker, so the deleted push gate ran them
   after its explicit `Install ffmpeg` step. Their guard is only
   `skipif(shutil.which("ffmpeg") is None)`, so putting ffmpeg on `PATH` recovers all 4 locally —
   unlike `kokoro`, nothing about the platform is in the way.
-- **What those 12 covered is wider than TTS.** They are the 5 render-ceremony tests, the 5
-  preview/confirm tests, `test_render_keeps_g2p_source_when_gemma_unavailable`, and
-  `test_warm_all_does_not_raise`. So what now runs nowhere also includes every route-level
+- **What those 11 covered is wider than TTS.** They are 3 `TestRenderCeremony` tests, 1
+  `TestGetCeremony` test, the 5 `TestPreviewIPA`/`TestConfirmIPA` tests,
+  `test_render_keeps_g2p_source_when_gemma_unavailable`, and `test_warm_all_does_not_raise`. So what now runs nowhere also includes every route-level
   `ipa_source` transition except `recognized`-on-upload, the preview-does-not-persist guard
   (`test_preview_does_not_store` is its only test), and the only automated call to
   `warm_all()` — the surface of the known g2p bug above. The *model-level* invariant is
@@ -396,9 +600,9 @@ former GKE setup did this at the nginx ingress. A bare adapter-node deploy with 
   numbers exist only if they are run and recorded by hand.
 - **Three in-tree comments still name the deleted "push gate."** `app/tests/pytest.ini:9` (the
   `integration` marker description, which `pytest --markers` prints, so the suite advertises a
-  gate the repo no longer has), `app/tests/test_models.py:207` (its "the other 11" counts
-  correctly — the other `@integration` tests besides itself — but the gate it says deselected
-  them is gone), and `app/tests/_deps.py:6` (justifies `find_spec` over a real import partly by
+  gate the repo no longer has), `app/tests/test_models.py:529` (**"deselecting the other 11" is
+  off by one** — that test is itself `@integration` and there are 11 in total, so the others
+  number 10; the gate it says deselected them is also gone), and `app/tests/_deps.py:6` (justifies `find_spec` over a real import partly by
   that CI job installing the full pinned requirements — now moot; only the slim-local-venv half
   of the rationale still applies). Prose only, nothing breaks. All three were fenced out of the
   brief that deleted the gate, so they belong to the brief that owns the test files. Note when
