@@ -110,14 +110,18 @@ class TestGitIsDecodedExplicitly:
     def test_an_undecodable_byte_costs_one_character_not_the_whole_field(
         self, monkeypatch
     ):
-        """With `errors='strict'` this returns `""` and `git_dirty` goes
-        False on a dirty tree. With `errors='replace'` the field survives.
+        """`\\xff` can never appear in UTF-8, so this fixture fails to decode
+        under `errors='strict'`: `_git` would return `""` and `git_dirty` would
+        go False on a dirty tree. With `errors='replace'` the field survives
+        with one U+FFFD in place of the byte.
+
+        (A valid UTF-8 fixture such as `caf\\xc3\\xa9` would not catch a switch
+        to `strict`: it decodes cleanly either way.)
         """
-        real_run = provenance.subprocess.run
 
         def fake_run(argv, **kwargs):
-            # What a cp1252 host does to a UTF-8 path byte it cannot map.
-            raw = b" M caf\xc3\xa9.md\n"
+            # A path byte that is not valid UTF-8, decoded the way `_git` asks.
+            raw = b" M caf\xff.md\n"
             class R:
                 stdout = raw.decode(kwargs["encoding"], errors=kwargs["errors"])
             return R()
@@ -125,8 +129,7 @@ class TestGitIsDecodedExplicitly:
         monkeypatch.setattr(provenance.subprocess, "run", fake_run)
         out = provenance._git("status", "--porcelain")
         assert out, "a dirty tree must not decode to an empty string"
-        assert bool(out) is True
-        provenance.subprocess.run = real_run
+        assert "\ufffd" in out, "the undecodable byte should become U+FFFD"
 
 
 class TestCollect:
