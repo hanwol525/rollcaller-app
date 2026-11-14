@@ -36,11 +36,24 @@ EXPECTED_ESPEAK = (1, 52, 0)
 
 
 def _git(*args: str) -> str:
-    """Run a read-only git command. Never a write -- Han owns the history."""
+    """Run a read-only git command. Never a write -- Han owns the history.
+
+    ``encoding`` is explicit because ``text=True`` alone decodes with the
+    locale's preferred encoding, and that is not a cosmetic difference here.
+    ``git_dirty`` is ``bool()`` of ``git status --porcelain``, whose output
+    carries **paths**; on a host whose locale is a single-byte code page, a
+    non-ASCII path can fail to decode, the bare ``except`` below turns that
+    into ``""``, and the provenance header then reports a **clean tree while
+    the tree is dirty**. ``errors="replace"`` rather than strict for the same
+    reason: a byte we cannot read should cost one character, not the whole
+    field. Neither value is ever parsed -- one is hex, the other is only
+    tested for emptiness -- so a replacement character is harmless.
+    """
     try:
         return subprocess.run(
             ("git",) + args,
             capture_output=True, text=True, timeout=10, check=True,
+            encoding="utf-8", errors="replace",
         ).stdout.strip()
     except Exception:
         return ""

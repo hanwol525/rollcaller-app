@@ -80,6 +80,58 @@ class TestEspeakProbe:
         assert version == "unavailable" and "RuntimeError" in library and warning
 
 
+class TestGitIsDecodedExplicitly:
+    """`text=True` alone decodes with the locale's preferred encoding.
+
+    That is not cosmetic. `git_dirty` is `bool()` of `git status --porcelain`,
+    whose output carries paths; on a host whose locale is a single-byte code
+    page a non-ASCII path can fail to decode, `_git`'s bare `except` turns
+    that into `""`, and the header then reports a **clean tree while the tree
+    is dirty** -- a provenance record that lies in the safe-looking direction.
+    """
+
+    def test_the_subprocess_call_names_an_encoding(self, monkeypatch):
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen.update(kwargs)
+
+            class R:
+                stdout = ""
+            return R()
+
+        monkeypatch.setattr(provenance.subprocess, "run", fake_run)
+        provenance._git("status", "--porcelain")
+
+        assert seen.get("encoding") == "utf-8", (
+            "text=True without encoding= decodes with the locale's encoding"
+        )
+
+    def test_an_undecodable_byte_costs_one_character_not_the_whole_field(
+        self, monkeypatch
+    ):
+        """`\\xff` can never appear in UTF-8, so this fixture fails to decode
+        under `errors='strict'`: `_git` would return `""` and `git_dirty` would
+        go False on a dirty tree. With `errors='replace'` the field survives
+        with one U+FFFD in place of the byte.
+
+        (A valid UTF-8 fixture such as `caf\\xc3\\xa9` would not catch a switch
+        to `strict`: it decodes cleanly either way.)
+        """
+
+        def fake_run(argv, **kwargs):
+            # A path byte that is not valid UTF-8, decoded the way `_git` asks.
+            raw = b" M caf\xff.md\n"
+            class R:
+                stdout = raw.decode(kwargs["encoding"], errors=kwargs["errors"])
+            return R()
+
+        monkeypatch.setattr(provenance.subprocess, "run", fake_run)
+        out = provenance._git("status", "--porcelain")
+        assert out, "a dirty tree must not decode to an empty string"
+        assert "\ufffd" in out, "the undecodable byte should become U+FFFD"
+
+
 class TestCollect:
     def test_git_is_only_ever_asked_read_only_questions(self, monkeypatch, no_network):
         """Han owns the git history; CLAUDE.md permits only read-only verbs.
