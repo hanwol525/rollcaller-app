@@ -144,24 +144,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
         print(f"  {engine}: {len(records)} names in "
               f"{time.perf_counter() - started:.1f}s")
 
-    header = {
-        "split": args.split,
-        "langs": list(args.langs),
-        "engines": list(args.engines),
-        "limit": args.limit,
-        "n_names": len(records),
-        # Which voice actually produced each language's IPA. Recoverable from
-        # espeak_warm_seconds' key order, but only positionally -- and "which
-        # voice said this" is the provenance a pronunciation baseline turns
-        # on, so it is recorded as data.
-        "espeak_voices": dict(codes),
-        "espeak_warm_seconds": {k: round(v, 3) for k, v in timings.items()},
-        # Empty for an as-shipped run. Non-empty means the harness added
-        # fields to the outgoing request body, so the run measures a path the
-        # app cannot take by itself.
-        "extra_payload": args.extra_payload or {},
-        "provenance": prov.as_dict(),
-    }
+    header = _run_header(args, codes, timings, prov, len(records))
     path = runfile.write(_run_path(args, prov), header, rows)
     print(f"\nwrote {len(rows)} rows -> {path}")
     if branches:
@@ -175,6 +158,30 @@ def cmd_generate(args: argparse.Namespace) -> int:
             print(f"  {count:6}  {kind}")
     print(f"\nnext: python -m eval score --run {path}")
     return 0
+
+
+def _run_header(args, codes, timings, prov, n_names: int) -> dict:
+    """The run file's header. Its own function so tests build it the way
+    ``cmd_generate`` does, rather than reading whatever run happens to sit in
+    the gitignored ``runs/`` directory."""
+    return {
+        "split": args.split,
+        "langs": list(args.langs),
+        "engines": list(args.engines),
+        "limit": args.limit,
+        "n_names": n_names,
+        # Which voice actually produced each language's IPA. Recoverable from
+        # espeak_warm_seconds' key order, but only positionally -- and "which
+        # voice said this" is the provenance a pronunciation baseline turns
+        # on, so it is recorded as data.
+        "espeak_voices": dict(codes),
+        "espeak_warm_seconds": {k: round(v, 3) for k, v in timings.items()},
+        # Empty for an as-shipped run. Non-empty means the harness added
+        # fields to the outgoing request body, so the run measures a path the
+        # app cannot take by itself.
+        "extra_payload": getattr(args, "extra_payload", None) or {},
+        "provenance": prov.as_dict(),
+    }
 
 
 def _payload(value: str) -> dict:
@@ -200,7 +207,8 @@ def cmd_probe(args: argparse.Namespace) -> int:
     whether a model needs a thinking-off configuration at all.
 
     **Covered by the paid-run gate as an explicit exemption:** one request,
-    or five with ``--levers`` (as-shipped plus the four candidates), each of
+    or at most five with ``--levers`` (as-shipped plus the four candidates,
+    sent only when as-shipped shows the model reasons by default), each of
     roughly 100 input tokens, a small fraction of a cent.
     """
     if args.levers and args.extra_payload:
@@ -226,25 +234,24 @@ def cmd_probe(args: argparse.Namespace) -> int:
     print(f"probing {fields['model_id']} at {fields['model_host']} "
           f"with name={name!r}\n")
 
-    attempts = [None]
-    if args.levers:
-        # as-shipped first: if the model does not reason by default, the two
-        # configurations are identical and only as-shipped is ever run.
-        attempts += [dict(c) for c in llm.THINKING_OFF_CANDIDATES]
-        attempts += [{**llm.THINKING_OFF_CANDIDATES[0], **llm.REQUIRE_PARAMETERS}]
-
-    results = []
-    for extra in attempts:
-        label = "as-shipped" if not extra else repr(extra)
+    def attempt(extra, label):
         print(f"--- {label} ---")
-        result = llm.probe(
-            extra_payload=args.extra_payload if not args.levers else extra,
-            name=name)
+        result = llm.probe(extra_payload=extra, name=name)
         print(result.render())
         print()
-        results.append((label, result))
+        return label, result
 
+    # As-shipped first, and on its own: the levers are only worth paying for
+    # when it shows the model reasons by default. If it does not, the two
+    # configurations are identical and only as-shipped is ever run.
+    results = [attempt(None if args.levers else args.extra_payload,
+                       "as-shipped")]
     baseline = results[0][1]
+    if args.levers and baseline.reasons_by_default:
+        levers = [dict(c) for c in llm.THINKING_OFF_CANDIDATES]
+        levers.append({**llm.THINKING_OFF_CANDIDATES[0], **llm.REQUIRE_PARAMETERS})
+        results += [attempt(extra, repr(extra)) for extra in levers]
+
     print("=" * 70)
     if baseline.reasons_by_default is None:
         print("INCONCLUSIVE: the as-shipped request did not return a usable "
@@ -458,12 +465,7 @@ def cmd_paired(args: argparse.Namespace) -> int:
     format change. Keeping it a command means the number in a summary can be
     reproduced rather than retyped -- which is the failure this is for.
     """
-    from eval import kokoro_vocab, paired, runfile, score
-
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    vocab, revision = kokoro_vocab.fetch(str(CACHE_DIR))
-    print(f"kokoro vocabulary: {len(vocab)} symbols @ {revision[:8]}",
-          file=sys.stderr)
+    from eval import paired, runfile, score
 
     try:
         run = runfile.read(args.run)
@@ -485,7 +487,10 @@ def cmd_paired(args: argparse.Namespace) -> int:
     scored = [
         score.score_row(
             name=r.name, lang=r.lang, engine=r.engine, output=r.output or "",
-            references=tuple(r.references), vocab=vocab,
+            # Empty on purpose: the vocabulary only feeds the Kokoro-side
+            # figures, and the paired comparison reads raw_per_segment alone.
+            # Fetching it would make this pure command need Hugging Face.
+            references=tuple(r.references), vocab=frozenset(),
         )
         for r in run.rows
     ]

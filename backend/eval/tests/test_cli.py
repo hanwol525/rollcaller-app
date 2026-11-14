@@ -96,18 +96,35 @@ class TestTheRunHeaderIsSelfDescribing:
     pronunciation baseline turns on.
     """
 
-    def test_the_voice_used_for_each_language_is_recorded_as_data(self, tmp_path):
-        from eval import runfile
+    @pytest.fixture
+    def header(self, tmp_path, monkeypatch):
+        """A header built by cmd_generate's own code path and round-tripped
+        through a run file in tmp_path -- not a real run from the gitignored
+        runs/ directory, which is empty on a fresh clone."""
+        from phonemizer.backend import EspeakBackend
+
+        from eval import engines, runfile
+        from eval.dataset import espeak_code
+        # Every voice the corpus needs, plus the floor's, so validation
+        # passes without asking espeak-ng.
+        voices = {espeak_code(l): l for l in LANGUAGES} | {"en-us": "en"}
+        monkeypatch.setattr(EspeakBackend, "supported_languages",
+                            staticmethod(lambda: voices))
+        args = SimpleNamespace(split="dev", langs=LANGUAGES, engines=("floor",),
+                               limit=1, extra_payload=None)
+        prov = SimpleNamespace(as_dict=lambda: {})
+        codes = engines.espeak_codes(LANGUAGES)
+        built = cli._run_header(args, codes, {c: 0.1 for c in codes.values()},
+                                prov, 0)
+        return runfile.read(runfile.write(tmp_path / "run.jsonl", built, [])).header
+
+    def test_the_voice_used_for_each_language_is_recorded_as_data(self, header):
         from eval.dataset import ESPEAK_CODE
-        run = next(p for p in (cli.RUNS_DIR).glob("dev-all-*.jsonl"))
-        header = runfile.read(run).header
         assert header["espeak_voices"]["fr"] == ESPEAK_CODE["fr"] == "fr-fr"
         assert set(header["espeak_voices"]) == set(header["langs"])
 
-    def test_every_other_language_maps_to_its_own_code(self):
-        from eval import runfile
-        run = next(p for p in (cli.RUNS_DIR).glob("dev-all-*.jsonl"))
-        voices = runfile.read(run).header["espeak_voices"]
+    def test_every_other_language_maps_to_its_own_code(self, header):
+        voices = header["espeak_voices"]
         assert [l for l, v in voices.items() if l != v] == ["fr"]
 
 
@@ -121,6 +138,29 @@ class TestTheProbeCommand:
         assert main(["probe", "--levers",
                      "--extra-payload", '{"reasoning":{"enabled":false}}']) == 2
         assert "one or the other" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("reasons,sent", [(False, 1), (True, 5)])
+    def test_levers_are_only_sent_when_the_baseline_reasons(
+        self, monkeypatch, reasons, sent
+    ):
+        """Each lever is a paid request. If as-shipped shows no reasoning,
+        thinking-off is the same configuration and there is nothing to try."""
+        from eval import llm
+        from eval.__main__ import main
+        calls = []
+
+        def fake_probe(extra_payload=None, name=None):
+            calls.append(extra_payload)
+            return SimpleNamespace(
+                reasons_by_default=reasons if extra_payload is None else False,
+                render=lambda: "")
+
+        monkeypatch.setattr(llm, "require_configured",
+                            lambda: {"model_id": "m", "model_host": "h"})
+        monkeypatch.setattr(llm, "probe", fake_probe)
+        assert main(["probe", "--levers"]) == 0
+        assert len(calls) == sent
+        assert calls[0] is None
 
     def test_extra_payload_must_be_a_json_object(self):
         from eval.__main__ import main

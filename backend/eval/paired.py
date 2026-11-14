@@ -72,7 +72,10 @@ def paired_differences(
     for row in scored:
         if row.engine not in (engine_a, engine_b):
             continue
-        if row.raw_per_segment is None:
+        # An empty output still carries a raw_per_segment -- the full-miss
+        # cost -- so `is None` alone would pair a name one engine never
+        # answered. summarise excludes those from the shared set too.
+        if not row.produced_any or row.raw_per_segment is None:
             continue
         by_lang.setdefault(row.lang, {}).setdefault(row.name, {})[
             row.engine

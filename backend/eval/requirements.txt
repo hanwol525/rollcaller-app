@@ -19,4 +19,4 @@ huggingface_hub==1.23.0  # match the app's; already satisfied in this venv
 # rather than merely unlikely; the gate is the app suite, which must still
 # read 182 passed / 15 skipped after this install.
 numpy==1.26.4
-pandas==3.0.6
+pandas==3.0.3            # match app/requirements.txt:73 exactly

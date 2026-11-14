@@ -7,11 +7,12 @@ from eval.paired import PairedDiff, paired_differences, render
 class _Row:
     """Enough of a RowScore for `paired_differences`."""
 
-    def __init__(self, lang, name, engine, raw):
+    def __init__(self, lang, name, engine, raw, produced_any=True):
         self.lang = lang
         self.name = name
         self.engine = engine
         self.raw_per_segment = raw
+        self.produced_any = produced_any
 
 
 def rows(*triples, lang="xx"):
@@ -36,6 +37,27 @@ class TestOnlyNamesBothEnginesAnsweredCount:
             "oracle", "today",
         )
         assert out["xx"].n == 1
+
+    def test_a_blank_output_is_dropped_though_it_carries_a_score(self):
+        """score_row gives an empty output the full-miss cost rather than
+        None, so `produced_any` is the only sign nothing was said. Pairing it
+        would charge the other engine's win to a name one never answered --
+        and summarise leaves such names out of the shared set."""
+        scored = rows(("a", "oracle", 1.0), ("a", "today", 0.5),
+                      ("b", "today", 0.5))
+        scored.append(_Row("xx", "b", "oracle", 7.25, produced_any=False))
+        out = paired_differences(scored, "oracle", "today")
+        assert out["xx"].n == 1
+        assert out["xx"].mean == pytest.approx(0.5)
+
+    def test_a_blank_output_really_does_carry_a_score(self):
+        """Pins the premise of the test above against the real scorer."""
+        pytest.importorskip("panphon")
+        from eval.score import score_row
+        row = score_row(name="Anna", lang="it", engine="floor", output="",
+                        references=("ˈanna",), vocab=frozenset())
+        assert row.produced_any is False
+        assert row.raw_per_segment is not None
 
     def test_a_third_engine_does_not_shrink_the_pair(self):
         """Amendment D intersects every engine in the file; this must not,
